@@ -69,12 +69,39 @@ class OneStepLanguageModel:
     def _epoch_header(epoch: int, epochs: int) -> str:
         return f"epoch {epoch:4d}/{epochs} {OneStepLanguageModel._progress_bar(epoch / max(1, epochs))}"
 
+    def _train_batch(self, input_indices: np.ndarray, target_indices: np.ndarray, learning_rate: float) -> float:
+        layer = self.net.layers[0]
+        x_batch = self._one_hot_cache[input_indices]
+        logits = x_batch @ layer.weights.T + layer.biases
+
+        logits = logits - np.max(logits, axis=1, keepdims=True)
+        exps = np.exp(logits)
+        probs = exps / np.sum(exps, axis=1, keepdims=True)
+
+        batch_size = max(1, input_indices.shape[0])
+        row_indices = np.arange(batch_size)
+        batch_loss = -np.log(np.maximum(1e-12, probs[row_indices, target_indices])).mean()
+
+        grad_logits = probs
+        grad_logits[row_indices, target_indices] -= 1.0
+        grad_logits /= batch_size
+
+        grad_weights = grad_logits.T @ x_batch
+        grad_biases = grad_logits.sum(axis=0)
+
+        layer.weights -= learning_rate * grad_weights
+        layer.biases -= learning_rate * grad_biases
+        layer._sync_neurons_from_matrix()
+
+        return float(batch_loss)
+
     def train(
         self,
         epochs: int = 80,
         learning_rate: float = 0.1,
         print_every: int = 10,
         progress_chunks: int = 10,
+        batch_size: int = 64,
     ) -> None:
         total_pairs = len(self.pairs)
         if total_pairs == 0:
@@ -87,40 +114,31 @@ class OneStepLanguageModel:
             )
             print("Progress: [----------------------------] 0.0%")
 
+        batch_size = max(1, int(batch_size))
         chunk_count = max(1, int(progress_chunks))
-        progress_stride = max(1, total_pairs // chunk_count)
+        total_batches = max(1, (total_pairs + batch_size - 1) // batch_size)
+        progress_stride = max(1, total_batches // chunk_count)
 
         for epoch in range(1, epochs + 1):
             np.random.shuffle(self.pairs)
             total_loss = 0.0
             print(f"{self._epoch_header(epoch, epochs)} start")
 
-            forward = self.net.forward
-            backward = self.net.backward
-            update_params = self.net.update_params
-            one_hot_cache = self._one_hot_cache
+            for batch_number, start in enumerate(range(0, total_pairs, batch_size), start=1):
+                batch_pairs = self.pairs[start:start + batch_size]
+                input_indices = batch_pairs[:, 0]
+                target_indices = batch_pairs[:, 1]
+                batch_loss = self._train_batch(input_indices, target_indices, learning_rate)
+                total_loss += batch_loss * len(batch_pairs)
 
-            for step, (input_idx, target_idx) in enumerate(self.pairs, start=1):
-                x = one_hot_cache[input_idx]
-                logits = forward(x)
-                probs = self._softmax(logits)
-
-                p_target = max(1e-12, probs[target_idx])
-                total_loss += -math.log(p_target)
-
-                grad_logits = np.array(probs, copy=True)
-                grad_logits[target_idx] -= 1.0
-
-                backward(grad_logits)
-                update_params(learning_rate)
-
-                if total_pairs >= 200 and (step % progress_stride == 0 or step == total_pairs):
-                    pct = (step / total_pairs) * 100.0
-                    running_loss = total_loss / step
-                    bar = self._progress_bar(step / total_pairs)
+                if total_pairs >= 200 and (batch_number % progress_stride == 0 or start + batch_size >= total_pairs):
+                    seen = min(total_pairs, start + len(batch_pairs))
+                    pct = (seen / total_pairs) * 100.0
+                    running_loss = total_loss / seen
+                    bar = self._progress_bar(seen / total_pairs)
                     print(
                         f"epoch {epoch:4d}/{epochs} {self._progress_bar(epoch / epochs)} | sub {bar} {pct:5.1f}% "
-                        f"| {step:6d}/{total_pairs:<6d} | running loss {running_loss:.4f}",
+                        f"| {seen:6d}/{total_pairs:<6d} | batch loss {batch_loss:.4f} | running loss {running_loss:.4f}",
                         flush=True,
                     )
 
