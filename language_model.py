@@ -56,12 +56,40 @@ class OneStepLanguageModel:
                 return i
         return len(probs) - 1
 
-    def train(self, epochs: int = 80, learning_rate: float = 0.1, print_every: int = 10) -> None:
+    @staticmethod
+    def _progress_bar(progress: float, width: int = 28) -> str:
+        progress = max(0.0, min(1.0, progress))
+        filled = int(round(progress * width))
+        filled = min(width, max(0, filled))
+        empty = width - filled
+        return f"[{('=' * filled)}{('-' * empty)}]"
+
+    def train(
+        self,
+        epochs: int = 80,
+        learning_rate: float = 0.1,
+        print_every: int = 10,
+        progress_chunks: int = 10,
+    ) -> None:
+        total_pairs = len(self.pairs)
+        if total_pairs == 0:
+            raise ValueError("Training data does not contain any adjacent token pairs.")
+
+        if total_pairs >= 200:
+            print(
+                f"Training {self.model_type} model on {total_pairs} pairs "
+                f"({len(self.tokens)} tokens, vocab {self.vocab_size}) for {epochs} epochs"
+            )
+            print("Progress: [----------------------------] 0.0%")
+
+        chunk_count = max(1, int(progress_chunks))
+        progress_stride = max(1, total_pairs // chunk_count)
+
         for epoch in range(1, epochs + 1):
             random.shuffle(self.pairs)
             total_loss = 0.0
 
-            for input_idx, target_idx in self.pairs:
+            for step, (input_idx, target_idx) in enumerate(self.pairs, start=1):
                 x = self.one_hot(input_idx)
                 logits = self.net.forward(x)
                 probs = self._softmax(logits)
@@ -75,9 +103,23 @@ class OneStepLanguageModel:
                 self.net.backward(grad_logits)
                 self.net.update_params(learning_rate)
 
+                if total_pairs >= 200 and (step % progress_stride == 0 or step == total_pairs):
+                    pct = (step / total_pairs) * 100.0
+                    running_loss = total_loss / step
+                    bar = self._progress_bar(step / total_pairs)
+                    print(
+                        f"epoch {epoch:4d}/{epochs} {bar} {pct:5.1f}% "
+                        f"| {step:6d}/{total_pairs:<6d} | running loss {running_loss:.4f}",
+                        flush=True,
+                    )
+
             if epoch % max(1, print_every) == 0 or epoch == 1 or epoch == epochs:
                 avg_loss = total_loss / len(self.pairs)
-                print(f"epoch {epoch:4d} | avg loss {avg_loss:.4f}")
+                print(
+                    f"epoch {epoch:4d}/{epochs} {self._progress_bar(1.0)} 100.0% "
+                    f"| avg loss {avg_loss:.4f}",
+                    flush=True,
+                )
 
     def predict_logits_and_probs(self, current_token: str, temperature: float = 1.0) -> Tuple[List[float], List[float]]:
         if current_token not in self.stoi:
@@ -256,6 +298,11 @@ def demo() -> None:
     print("sample t=1.0:")
     print(loaded_word.generate(seed="hello", length=28, temperature=1.0))
 
+def demon() -> None:
+    #read the model from the file
+    loaded_word = WordLanguageModel.load("nsoe.json")
+    print("sample t=1.0:")
+    print(loaded_word.generate(seed="hello", length=28, temperature=1.0))
 
 if __name__ == "__main__":
-    demo()
+    demon()
