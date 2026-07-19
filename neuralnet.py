@@ -54,13 +54,15 @@ class Neuron:
         self.last_letter = "A"
 
     @staticmethod
-    def output_to_letter(value):
+    def output_to_letter(value, temperature=1.0):
         # Squash arbitrary activations into 0..1 before mapping to A..Z.
-        if value >= 0:
-            exp_term = math.exp(-value)
+        temp = max(1e-6, float(temperature))
+        scaled_value = value / temp
+        if scaled_value >= 0:
+            exp_term = math.exp(-scaled_value)
             normalized = 1.0 / (1.0 + exp_term)
         else:
-            exp_term = math.exp(value)
+            exp_term = math.exp(scaled_value)
             normalized = exp_term / (1.0 + exp_term)
         index = min(25, max(0, int(normalized * 26)))
         return chr(65 + index)
@@ -84,4 +86,13 @@ class Neuron:
         self.weights = [w - learning_rate * gw for w, gw in zip(self.weights, self.grad_weights)]
         self.bias -= learning_rate * self.grad_bias
 
+
+def create_neuron(input_size):
+    return Neuron(input_size)
+
+def create_layer(num_neurons, input_size):
+    return Layer(num_neurons, input_size)
+
+def create_network():
+    return NeuralNetwork()
 

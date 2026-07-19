@@ -3,9 +3,12 @@ import warnings
 import neuralnet
 import random
 import time 
-nn = neuralnet.NeuralNetwork()
-for _ in range(4):
-    nn.add_layer(neuralnet.Neuron(128))
+
+nn = neuralnet.create_network()
+for _ in range(10):
+    nn.add_layer(neuralnet.create_layer(27, 27))
+
+LETTER_TEMPERATURE = 0.8
 
 def init_font():
     try:
@@ -27,7 +30,7 @@ def display_entire_network(screen, network, x, font, start_x=50, start_y=50, lay
             neurons = layer.neurons
         for neuron in neurons:
             output = neuron.forward(x, screen=None)
-            letter = neuron.output_to_letter(output)
+            letter = neuron.output_to_letter(output, temperature=LETTER_TEMPERATURE)
             neuron_rect = pygame.Rect(current_x, current_y, 50, 50)
             pygame.draw.ellipse(screen, (max(0, min(127, int(output * 127))), max(0, min(127, int(output * 127))), max(0, min(127, int(output * 127)))), neuron_rect)
             if font is not None:
@@ -47,14 +50,14 @@ def main():
     if font is None:
         print("Warning: pygame font module is unavailable in this environment.")
 
-    screen = pygame.display.set_mode((800, 600))
+    screen = pygame.display.set_mode((1000, 800))
     running = True
     while running:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
         screen.fill((0, 0, 0))
-        alphabet_input = [random.uniform(-1.0, 1.0) for _ in range(128)]
+        alphabet_input = [random.uniform(-1.0, 1.0) for _ in range(27)]
         display_entire_network(screen, nn, alphabet_input, font)  # Example input
         pygame.display.flip()
     pygame.quit()
