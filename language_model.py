@@ -2,6 +2,7 @@ import json
 import math
 import random
 import re
+import sys
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -69,6 +70,11 @@ class OneStepLanguageModel:
     def _epoch_header(epoch: int, epochs: int) -> str:
         return f"epoch {epoch:4d}/{epochs} {OneStepLanguageModel._progress_bar(epoch / max(1, epochs))}"
 
+    @staticmethod
+    def _write_progress_line(text: str) -> None:
+        sys.stdout.write("\r" + text + "\x1b[K")
+        sys.stdout.flush()
+
     def _train_batch(self, input_indices: np.ndarray, target_indices: np.ndarray, learning_rate: float) -> float:
         layer = self.net.layers[0]
         x_batch = self._one_hot_cache[input_indices]
@@ -112,7 +118,7 @@ class OneStepLanguageModel:
                 f"Training {self.model_type} model on {total_pairs} pairs "
                 f"({len(self.tokens)} tokens, vocab {self.vocab_size}) for {epochs} epochs"
             )
-            print("Progress: [----------------------------] 0.0%")
+            self._write_progress_line("Progress: [----------------------------] 0.0%")
 
         batch_size = max(1, int(batch_size))
         chunk_count = max(1, int(progress_chunks))
@@ -122,7 +128,7 @@ class OneStepLanguageModel:
         for epoch in range(1, epochs + 1):
             np.random.shuffle(self.pairs)
             total_loss = 0.0
-            print(f"{self._epoch_header(epoch, epochs)} start")
+            self._write_progress_line(f"{self._epoch_header(epoch, epochs)} start")
 
             for batch_number, start in enumerate(range(0, total_pairs, batch_size), start=1):
                 batch_pairs = self.pairs[start:start + batch_size]
@@ -136,19 +142,20 @@ class OneStepLanguageModel:
                     pct = (seen / total_pairs) * 100.0
                     running_loss = total_loss / seen
                     bar = self._progress_bar(seen / total_pairs)
-                    print(
+                    self._write_progress_line(
                         f"epoch {epoch:4d}/{epochs} {self._progress_bar(epoch / epochs)} | sub {bar} {pct:5.1f}% "
-                        f"| {seen:6d}/{total_pairs:<6d} | batch loss {batch_loss:.4f} | running loss {running_loss:.4f}",
-                        flush=True,
+                        f"| {seen:6d}/{total_pairs:<6d} | batch loss {batch_loss:.4f} | running loss {running_loss:.4f}"
                     )
 
             if epoch % max(1, print_every) == 0 or epoch == 1 or epoch == epochs:
                 avg_loss = total_loss / len(self.pairs)
-                print(
+                self._write_progress_line(
                     f"epoch {epoch:4d}/{epochs} {self._progress_bar(epoch / epochs)} | sub {self._progress_bar(1.0)} 100.0% "
-                    f"| avg loss {avg_loss:.4f}",
-                    flush=True,
+                    f"| avg loss {avg_loss:.4f}"
                 )
+
+        sys.stdout.write("\n")
+        sys.stdout.flush()
 
     def predict_logits_and_probs(self, current_token: str, temperature: float = 1.0) -> Tuple[List[float], List[float]]:
         if current_token not in self.stoi:
