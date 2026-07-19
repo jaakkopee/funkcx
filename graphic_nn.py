@@ -2,11 +2,10 @@ import pygame
 import warnings
 import neuralnet
 import random
-
+import time 
 nn = neuralnet.NeuralNetwork()
-nn.add_layer(neuralnet.Neuron(128))
-nn.add_layer(neuralnet.Neuron(16))
-nn.add_layer(neuralnet.Neuron(4))  # Example: adding another neuron with 4 inputs
+for _ in range(4):
+    nn.add_layer(neuralnet.Neuron(128))
 
 def init_font():
     try:
@@ -28,16 +27,18 @@ def display_entire_network(screen, network, x, font, start_x=50, start_y=50, lay
             neurons = layer.neurons
         for neuron in neurons:
             output = neuron.forward(x, screen=None)
+            letter = neuron.output_to_letter(output)
             neuron_rect = pygame.Rect(current_x, current_y, 50, 50)
-            pygame.draw.ellipse(screen, (255, 255, 255), neuron_rect)
+            pygame.draw.ellipse(screen, (max(0, min(127, int(output * 127))), max(0, min(127, int(output * 127))), max(0, min(127, int(output * 127)))), neuron_rect)
             if font is not None:
-                neuron_output_surface = font.render(f"{output:.2f}", True, (255, 255, 255))
+                neuron_output_surface = font.render(letter, True, (255, 0, 127))
                 screen.blit(neuron_output_surface, (current_x, current_y))
             else:
-                print(f"Neuron output at ({current_x}, {current_y}): {output:.2f}")
+                print(f"Neuron output at ({current_x}, {current_y}): {output:.2f} -> {letter}")
             current_y += neuron_spacing
         current_x += layer_spacing
         current_y = start_y
+    time.sleep(0.3)
 
 
 def main():
@@ -53,8 +54,8 @@ def main():
             if event.type == pygame.QUIT:
                 running = False
         screen.fill((0, 0, 0))
-        random_input = [random.random() for _ in range(128)]
-        display_entire_network(screen, nn, random_input, font)  # Example input
+        alphabet_input = [random.uniform(-1.0, 1.0) for _ in range(128)]
+        display_entire_network(screen, nn, alphabet_input, font)  # Example input
         pygame.display.flip()
     pygame.quit()
 
