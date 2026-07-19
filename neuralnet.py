@@ -1,6 +1,8 @@
 import math
 import random
 
+import numpy as np
+
 
 class NeuralNetwork:
     def __init__(self):
@@ -32,13 +34,13 @@ class Layer:
         outputs = []
         for neuron in self.neurons:
             outputs.append(neuron.forward(x, screen=screen))
-        return outputs
+        return np.array(outputs, dtype=float)
 
     def backward(self, grad):
-        grads = [0] * len(self.neurons[0].weights)
+        grads = np.zeros(len(self.neurons[0].weights), dtype=float)
         for neuron, g in zip(self.neurons, grad):
             neuron_grads = neuron.backward(g)
-            grads = [sum(x) for x in zip(grads, neuron_grads)]
+            grads = grads + neuron_grads
         return grads
 
     def update_params(self, learning_rate):
@@ -48,7 +50,7 @@ class Layer:
 class Neuron:
     def __init__(self, input_size):
         scale = 1.0 / math.sqrt(max(1, input_size))
-        self.weights = [random.uniform(-1.0, 1.0) * scale for _ in range(input_size)]
+        self.weights = np.random.uniform(-1.0, 1.0, size=input_size) * scale
         self.bias = random.uniform(-0.1, 0.1)
         self.activation = None
         self.last_letter = "A"
@@ -68,8 +70,9 @@ class Neuron:
         return chr(65 + index)
 
     def forward(self, x, screen=None):
-        self.activation = sum(w * i for w, i in zip(self.weights, x)) + self.bias
-        self.last_input = x
+        x_array = np.asarray(x, dtype=float)
+        self.activation = float(np.dot(self.weights, x_array) + self.bias)
+        self.last_input = x_array
         self.last_output = self.activation
         self.last_letter = self.output_to_letter(self.last_output)
         if screen is not None:
@@ -78,12 +81,13 @@ class Neuron:
         return self.last_output
 
     def backward(self, grad):
-        self.grad_weights = [grad * i for i in self.last_input]
-        self.grad_bias = grad
-        return [grad * w for w in self.weights]
+        grad_value = float(grad)
+        self.grad_weights = grad_value * self.last_input
+        self.grad_bias = grad_value
+        return grad_value * self.weights
 
     def update_params(self, learning_rate):
-        self.weights = [w - learning_rate * gw for w, gw in zip(self.weights, self.grad_weights)]
+        self.weights = self.weights - (learning_rate * self.grad_weights)
         self.bias -= learning_rate * self.grad_bias
 
 

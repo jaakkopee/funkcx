@@ -4,6 +4,8 @@ import random
 import re
 from typing import Dict, List, Tuple
 
+import numpy as np
+
 import neuralnet
 
 
@@ -27,24 +29,23 @@ class OneStepLanguageModel:
         self.net = neuralnet.create_network()
         self.net.add_layer(neuralnet.create_layer(self.vocab_size, self.vocab_size))
 
-        self.pairs: List[Tuple[int, int]] = [
-            (self.stoi[tokens[i]], self.stoi[tokens[i + 1]])
-            for i in range(len(tokens) - 1)
-        ]
+        self.pairs = np.array(
+            [(self.stoi[tokens[i]], self.stoi[tokens[i + 1]]) for i in range(len(tokens) - 1)],
+            dtype=np.int32,
+        )
+
+        self._one_hot_cache = np.eye(self.vocab_size, dtype=np.float32)
 
     def one_hot(self, index: int) -> List[float]:
-        vec = [0.0] * self.vocab_size
-        vec[index] = 1.0
-        return vec
+        return self._one_hot_cache[index]
 
     @staticmethod
-    def _softmax(logits: List[float], temperature: float = 1.0) -> List[float]:
+    def _softmax(logits: List[float], temperature: float = 1.0) -> np.ndarray:
         temp = max(1e-6, float(temperature))
-        scaled = [x / temp for x in logits]
-        max_scaled = max(scaled)
-        exps = [math.exp(x - max_scaled) for x in scaled]
-        total = sum(exps)
-        return [x / total for x in exps]
+        logits_array = np.asarray(logits, dtype=np.float64) / temp
+        logits_array = logits_array - np.max(logits_array)
+        exps = np.exp(logits_array)
+        return exps / np.sum(exps)
 
     @staticmethod
     def _sample_from_probs(probs: List[float]) -> int:
@@ -63,6 +64,10 @@ class OneStepLanguageModel:
         filled = min(width, max(0, filled))
         empty = width - filled
         return f"[{('=' * filled)}{('-' * empty)}]"
+
+    @staticmethod
+    def _epoch_header(epoch: int, epochs: int) -> str:
+        return f"epoch {epoch:4d}/{epochs} {OneStepLanguageModel._progress_bar(epoch / max(1, epochs))}"
 
     def train(
         self,
@@ -86,29 +91,35 @@ class OneStepLanguageModel:
         progress_stride = max(1, total_pairs // chunk_count)
 
         for epoch in range(1, epochs + 1):
-            random.shuffle(self.pairs)
+            np.random.shuffle(self.pairs)
             total_loss = 0.0
+            print(f"{self._epoch_header(epoch, epochs)} start")
+
+            forward = self.net.forward
+            backward = self.net.backward
+            update_params = self.net.update_params
+            one_hot_cache = self._one_hot_cache
 
             for step, (input_idx, target_idx) in enumerate(self.pairs, start=1):
-                x = self.one_hot(input_idx)
-                logits = self.net.forward(x)
+                x = one_hot_cache[input_idx]
+                logits = forward(x)
                 probs = self._softmax(logits)
 
                 p_target = max(1e-12, probs[target_idx])
                 total_loss += -math.log(p_target)
 
-                grad_logits = probs[:]
+                grad_logits = np.array(probs, copy=True)
                 grad_logits[target_idx] -= 1.0
 
-                self.net.backward(grad_logits)
-                self.net.update_params(learning_rate)
+                backward(grad_logits)
+                update_params(learning_rate)
 
                 if total_pairs >= 200 and (step % progress_stride == 0 or step == total_pairs):
                     pct = (step / total_pairs) * 100.0
                     running_loss = total_loss / step
                     bar = self._progress_bar(step / total_pairs)
                     print(
-                        f"epoch {epoch:4d}/{epochs} {bar} {pct:5.1f}% "
+                        f"epoch {epoch:4d}/{epochs} {self._progress_bar(epoch / epochs)} | sub {bar} {pct:5.1f}% "
                         f"| {step:6d}/{total_pairs:<6d} | running loss {running_loss:.4f}",
                         flush=True,
                     )
@@ -116,7 +127,7 @@ class OneStepLanguageModel:
             if epoch % max(1, print_every) == 0 or epoch == 1 or epoch == epochs:
                 avg_loss = total_loss / len(self.pairs)
                 print(
-                    f"epoch {epoch:4d}/{epochs} {self._progress_bar(1.0)} 100.0% "
+                    f"epoch {epoch:4d}/{epochs} {self._progress_bar(epoch / epochs)} | sub {self._progress_bar(1.0)} 100.0% "
                     f"| avg loss {avg_loss:.4f}",
                     flush=True,
                 )
@@ -125,14 +136,14 @@ class OneStepLanguageModel:
         if current_token not in self.stoi:
             raise ValueError(f"Token {current_token!r} not in vocabulary.")
 
-        x = self.one_hot(self.stoi[current_token])
+        x = self._one_hot_cache[self.stoi[current_token]]
         logits = self.net.forward(x)
         probs = self._softmax(logits, temperature=temperature)
         return logits, probs
 
     def predict_next_distribution(self, current_token: str, temperature: float = 1.0) -> List[Tuple[str, float]]:
         _, probs = self.predict_logits_and_probs(current_token, temperature=temperature)
-        return [(self.itos[i], probs[i]) for i in range(self.vocab_size)]
+        return [(self.itos[i], float(probs[i])) for i in range(self.vocab_size)]
 
     def top_k_predictions(self, current_token: str, k: int = 5, temperature: float = 1.0) -> List[Tuple[str, float]]:
         dist = self.predict_next_distribution(current_token, temperature=temperature)
@@ -149,7 +160,7 @@ class OneStepLanguageModel:
             "model_type": self.model_type,
             "tokens": self.tokens,
             "vocab": self.vocab,
-            "weights": [neuron.weights for neuron in layer.neurons],
+            "weights": [list(neuron.weights) for neuron in layer.neurons],
             "biases": [neuron.bias for neuron in layer.neurons],
         }
 
@@ -177,7 +188,7 @@ class OneStepLanguageModel:
             raise ValueError("Saved model shape does not match current network shape.")
 
         for i, neuron in enumerate(layer.neurons):
-            neuron.weights = list(saved_weights[i])
+            neuron.weights = np.asarray(saved_weights[i], dtype=np.float64)
             neuron.bias = float(saved_biases[i])
 
         return model
