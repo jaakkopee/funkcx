@@ -160,8 +160,8 @@ class OneStepLanguageModel:
             "model_type": self.model_type,
             "tokens": self.tokens,
             "vocab": self.vocab,
-            "weights": [list(neuron.weights) for neuron in layer.neurons],
-            "biases": [neuron.bias for neuron in layer.neurons],
+            "weights": layer.weights.tolist(),
+            "biases": layer.biases.tolist(),
         }
 
     @classmethod
@@ -190,6 +190,9 @@ class OneStepLanguageModel:
         for i, neuron in enumerate(layer.neurons):
             neuron.weights = np.asarray(saved_weights[i], dtype=np.float64)
             neuron.bias = float(saved_biases[i])
+
+        layer.weights = np.asarray(saved_weights, dtype=np.float64)
+        layer.biases = np.asarray(saved_biases, dtype=np.float64)
 
         return model
 

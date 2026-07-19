@@ -29,23 +29,42 @@ class NeuralNetwork:
 class Layer:
     def __init__(self, num_neurons, input_size):
         self.neurons = [Neuron(input_size) for _ in range(num_neurons)]
+        self.weights = np.vstack([neuron.weights for neuron in self.neurons]).astype(float)
+        self.biases = np.array([neuron.bias for neuron in self.neurons], dtype=float)
+        self.grad_weights = np.zeros_like(self.weights)
+        self.grad_biases = np.zeros_like(self.biases)
+
+    def _sync_neurons_from_matrix(self):
+        for neuron, weights, bias in zip(self.neurons, self.weights, self.biases):
+            neuron.weights = weights.copy()
+            neuron.bias = float(bias)
 
     def forward(self, x, screen=None):
-        outputs = []
-        for neuron in self.neurons:
-            outputs.append(neuron.forward(x, screen=screen))
-        return np.array(outputs, dtype=float)
+        x_array = np.asarray(x, dtype=float)
+        self.last_input = x_array
+        outputs = self.weights @ x_array + self.biases
+
+        if screen is not None and hasattr(screen, "display"):
+            for neuron, output in zip(self.neurons, outputs):
+                neuron.activation = float(output)
+                neuron.last_input = x_array
+                neuron.last_output = float(output)
+                neuron.last_letter = neuron.output_to_letter(neuron.last_output)
+                screen.display(neuron.last_letter)
+
+        self.last_output = outputs
+        return outputs
 
     def backward(self, grad):
-        grads = np.zeros(len(self.neurons[0].weights), dtype=float)
-        for neuron, g in zip(self.neurons, grad):
-            neuron_grads = neuron.backward(g)
-            grads = grads + neuron_grads
-        return grads
+        grad_array = np.asarray(grad, dtype=float)
+        self.grad_weights = np.outer(grad_array, self.last_input)
+        self.grad_biases = grad_array
+        return self.weights.T @ grad_array
 
     def update_params(self, learning_rate):
-        for neuron in self.neurons:
-            neuron.update_params(learning_rate)
+        self.weights = self.weights - (learning_rate * self.grad_weights)
+        self.biases = self.biases - (learning_rate * self.grad_biases)
+        self._sync_neurons_from_matrix()
 
 class Neuron:
     def __init__(self, input_size):
