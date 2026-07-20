@@ -10,6 +10,8 @@ MODEL_PATH = "nsoe.json"
 CORPUS_PATH = "nsoe.txt"
 LM_TEMPERATURE = 0.9
 TOP_K = 5
+MIN_ZOOM = 0.4
+MAX_ZOOM = 3.5
 
 
 def load_corpus_text(path):
@@ -52,7 +54,29 @@ def init_font():
         return None
 
 
-def display_distribution(screen, font, model, current_token, temperature):
+def world_to_screen(x, y, camera):
+    zoom = camera["zoom"]
+    sx = int(x * zoom + camera["offset_x"])
+    sy = int(y * zoom + camera["offset_y"])
+    return sx, sy
+
+
+def zoom_at(camera, factor, mouse_pos):
+    old_zoom = camera["zoom"]
+    new_zoom = max(MIN_ZOOM, min(MAX_ZOOM, old_zoom * factor))
+    if abs(new_zoom - old_zoom) < 1e-9:
+        return
+
+    mx, my = mouse_pos
+    world_x = (mx - camera["offset_x"]) / old_zoom
+    world_y = (my - camera["offset_y"]) / old_zoom
+
+    camera["zoom"] = new_zoom
+    camera["offset_x"] = mx - world_x * new_zoom
+    camera["offset_y"] = my - world_y * new_zoom
+
+
+def display_distribution(screen, font, model, current_token, temperature, camera):
     logits, probs = model.predict_logits_and_probs(current_token, temperature=temperature)
 
     cols = 5
@@ -64,14 +88,16 @@ def display_distribution(screen, font, model, current_token, temperature):
     for idx, token in enumerate(model.vocab):
         row = idx // cols
         col = idx % cols
-        x = start_x + col * cell_w
-        y = start_y + row * cell_h
+        wx = start_x + col * cell_w
+        wy = start_y + row * cell_h
+        x, y = world_to_screen(wx, wy, camera)
 
         prob = probs[idx]
         intensity = max(28, min(255, int(prob * 1500)))
         color = (intensity, 70, max(25, 200 - intensity // 3))
 
-        rect = pygame.Rect(x, y, 18, 18)
+        node_size = max(6, int(18 * camera["zoom"]))
+        rect = pygame.Rect(x, y, node_size, node_size)
         pygame.draw.ellipse(screen, color, rect)
 
         if font is not None:
@@ -79,9 +105,9 @@ def display_distribution(screen, font, model, current_token, temperature):
             if len(label) > 14:
                 label = label[:11] + "..."
             token_text = font.render(label, True, (245, 245, 245))
-            screen.blit(token_text, (x + 28, y - 2))
+            screen.blit(token_text, (x + node_size + 10, y - 2))
             prob_text = font.render(f"{prob:.3f}", True, (180, 180, 180))
-            screen.blit(prob_text, (x + 138, y - 2))
+            screen.blit(prob_text, (x + node_size + 120, y - 2))
 
     return logits, probs
 
@@ -115,16 +141,36 @@ def main():
     current_token = random.choice([token for token in model.vocab if token.isalpha()])
     generated_tokens = [current_token]
     frame_index = 0
+    camera = {"zoom": 1.0, "offset_x": 0.0, "offset_y": 0.0}
+    panning = False
 
     running = True
     while running:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 3:
+                    panning = True
+                elif event.button == 4:
+                    zoom_at(camera, 1.12, event.pos)
+                elif event.button == 5:
+                    zoom_at(camera, 1 / 1.12, event.pos)
+            elif event.type == pygame.MOUSEBUTTONUP:
+                if event.button == 3:
+                    panning = False
+            elif event.type == pygame.MOUSEMOTION and panning:
+                dx, dy = event.rel
+                camera["offset_x"] += dx
+                camera["offset_y"] += dy
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_r:
+                camera["zoom"] = 1.0
+                camera["offset_x"] = 0.0
+                camera["offset_y"] = 0.0
 
         screen.fill((0, 0, 0))
         top_k = model.top_k_predictions(current_token, k=TOP_K, temperature=LM_TEMPERATURE)
-        display_distribution(screen, font, model, current_token, LM_TEMPERATURE)
+        display_distribution(screen, font, model, current_token, LM_TEMPERATURE, camera)
 
         if font is not None:
             draw_text_lines(
@@ -134,6 +180,8 @@ def main():
                     f"Current token: {current_token}",
                     f"Temperature: {LM_TEMPERATURE}",
                     f"Vocab size: {model.vocab_size}",
+                    f"Zoom: {camera['zoom']:.2f}",
+                    "Pan: right-click drag | Zoom: mouse wheel | Reset: R",
                 ],
                 x=24,
                 y=20,
