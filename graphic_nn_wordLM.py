@@ -2,6 +2,7 @@ import pygame
 import warnings
 import random
 import os
+import colorsys
 
 from language_model import WordLanguageModel
 
@@ -76,8 +77,26 @@ def zoom_at(camera, factor, mouse_pos):
     camera["offset_y"] = my - world_y * new_zoom
 
 
+def activation_to_color(activation):
+    # Special cases first: very low activity is black, strong firing is white.
+    if activation <= 0.02:
+        return (0, 0, 0)
+    if activation >= 0.98:
+        return (255, 255, 255)
+
+    # Map activation to a visible spectrum via HSV hue.
+    t = max(0.0, min(1.0, float(activation)))
+    hue = (1.0 - t) * 0.66  # blue -> red
+    r, g, b = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
+    return (int(r * 255), int(g * 255), int(b * 255))
+
+
 def display_distribution(screen, font, model, current_token, temperature, camera):
     logits, probs = model.predict_logits_and_probs(current_token, temperature=temperature)
+    probs_array = list(float(p) for p in probs)
+    p_min = min(probs_array)
+    p_max = max(probs_array)
+    p_span = max(1e-12, p_max - p_min)
 
     cols = 5
     cell_w = 200
@@ -93,8 +112,8 @@ def display_distribution(screen, font, model, current_token, temperature, camera
         x, y = world_to_screen(wx, wy, camera)
 
         prob = probs[idx]
-        intensity = max(28, min(255, int(prob * 1500)))
-        color = (intensity, 70, max(25, 200 - intensity // 3))
+        normalized_activation = (float(prob) - p_min) / p_span
+        color = activation_to_color(normalized_activation)
 
         node_size = max(6, int(18 * camera["zoom"]))
         rect = pygame.Rect(x, y, node_size, node_size)
