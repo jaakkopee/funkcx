@@ -35,13 +35,16 @@ def load_or_train_word_model():
     if os.path.exists(MODEL_PATH):
         try:
             print(f"Loading model from {MODEL_PATH} ...")
-            return WordLanguageModel.load(MODEL_PATH)
+            model = WordLanguageModel.load(MODEL_PATH)
+            if getattr(model, "context_size", 1) >= 4:
+                return model
+            print("Saved model context is too small, retraining with larger context...")
         except Exception as exc:
             print(f"Failed to load saved model: {exc}")
 
     print("Training new word model ...")
     corpus = load_corpus_text(CORPUS_PATH)
-    model = WordLanguageModel(corpus)
+    model = WordLanguageModel(corpus, context_size=4)
     summarize_corpus(corpus, model)
     model.train(epochs=140, learning_rate=0.08, print_every=10, progress_chunks=12)
     model.save(MODEL_PATH)
@@ -94,8 +97,8 @@ def activation_to_color(activation):
     return (int(r * 255), int(g * 255), int(b * 255))
 
 
-def display_distribution(screen, font, model, current_token, temperature, camera):
-    logits, probs = model.predict_logits_and_probs(current_token, temperature=temperature)
+def display_distribution(screen, font, model, context_tokens, temperature, camera):
+    logits, probs = model.predict_logits_and_probs_from_context(context_tokens, temperature=temperature)
     probs_array = list(float(p) for p in probs)
     p_min = min(probs_array)
     p_max = max(probs_array)
@@ -162,6 +165,7 @@ def main():
     clock = pygame.time.Clock()
     current_token = random.choice([token for token in model.vocab if token.isalpha()])
     generated_tokens = [current_token]
+    context_tokens = [current_token]
     frame_index = 0
     camera = {"zoom": 1.0, "offset_x": 0.0, "offset_y": 0.0}
     panning = False
@@ -212,8 +216,8 @@ def main():
             camera["offset_y"] += pan_y * (height * ARROW_PAN_SCREEN_FRACTION)
 
         screen.fill((0, 0, 0))
-        top_k = model.top_k_predictions(current_token, k=TOP_K, temperature=LM_TEMPERATURE)
-        display_distribution(screen, font, model, current_token, LM_TEMPERATURE, camera)
+        top_k = model.top_k_predictions_from_context(context_tokens, k=TOP_K, temperature=LM_TEMPERATURE)
+        display_distribution(screen, font, model, context_tokens, LM_TEMPERATURE, camera)
 
         # Cover network visuals under static text areas.
         width, height = screen.get_size()
@@ -248,9 +252,12 @@ def main():
         elif frame_index % 20 == 0:
             print(f"current={current_token!r} top={top_k}")
 
-        next_token = model.sample_next(current_token, temperature=LM_TEMPERATURE)
+        next_token = model.sample_next_from_context(context_tokens, temperature=LM_TEMPERATURE)
         generated_tokens.append(next_token)
         current_token = next_token
+        context_tokens.append(next_token)
+        if len(context_tokens) > model.context_size:
+            context_tokens.pop(0)
 
         pygame.display.flip()
         frame_index += 1

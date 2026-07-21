@@ -11,14 +11,15 @@ import neuralnet
 
 
 class OneStepLanguageModel:
-    """One-step next-token language model built on the sketch network."""
+    """Next-token language model with configurable context window."""
 
     model_type = "base"
 
-    def __init__(self, tokens: List[str]):
+    def __init__(self, tokens: List[str], context_size: int = 1):
         if len(tokens) < 2:
             raise ValueError("Training tokens must contain at least 2 entries.")
 
+        self.context_size = max(1, int(context_size))
         self.tokens = tokens[:]
         self.vocab = sorted(set(tokens))
         self.vocab_size = len(self.vocab)
@@ -26,19 +27,55 @@ class OneStepLanguageModel:
         self.stoi: Dict[str, int] = {token: i for i, token in enumerate(self.vocab)}
         self.itos: Dict[int, str] = {i: token for token, i in self.stoi.items()}
 
-        # One linear layer maps one-hot(current token) -> logits(next token).
+        # A linear layer maps concatenated one-hot context -> logits(next token).
         self.net = neuralnet.create_network()
-        self.net.add_layer(neuralnet.create_layer(self.vocab_size, self.vocab_size))
-
-        self.pairs = np.array(
-            [(self.stoi[tokens[i]], self.stoi[tokens[i + 1]]) for i in range(len(tokens) - 1)],
-            dtype=np.int32,
+        self.net.add_layer(
+            neuralnet.create_layer(self.vocab_size, self.vocab_size * self.context_size)
         )
+
+        token_ids = np.array([self.stoi[token] for token in tokens], dtype=np.int32)
+        sample_count = len(token_ids) - 1
+        self.contexts = np.full((sample_count, self.context_size), -1, dtype=np.int32)
+        self.targets = np.empty(sample_count, dtype=np.int32)
+
+        for sample_idx in range(sample_count):
+            token_pos = sample_idx + 1
+            start_pos = max(0, token_pos - self.context_size)
+            history = token_ids[start_pos:token_pos]
+            if history.size > 0:
+                self.contexts[sample_idx, -history.size:] = history
+            self.targets[sample_idx] = token_ids[token_pos]
+
+        self.sample_count = sample_count
 
         self._one_hot_cache = np.eye(self.vocab_size, dtype=np.float32)
 
     def one_hot(self, index: int) -> List[float]:
         return self._one_hot_cache[index]
+
+    def _context_indices_to_input(self, context_indices: np.ndarray) -> np.ndarray:
+        context_input = np.zeros((self.context_size, self.vocab_size), dtype=np.float32)
+        valid = context_indices >= 0
+        if np.any(valid):
+            context_input[valid] = self._one_hot_cache[context_indices[valid]]
+        return context_input.reshape(self.context_size * self.vocab_size)
+
+    def _context_batch_to_inputs(self, context_batch: np.ndarray) -> np.ndarray:
+        batch_size = context_batch.shape[0]
+        context_input = np.zeros((batch_size, self.context_size, self.vocab_size), dtype=np.float32)
+        valid = context_batch >= 0
+        if np.any(valid):
+            context_input[valid] = self._one_hot_cache[context_batch[valid]]
+        return context_input.reshape(batch_size, self.context_size * self.vocab_size)
+
+    def _context_tokens_to_indices(self, context_tokens: List[str]) -> np.ndarray:
+        context_indices = np.full((self.context_size,), -1, dtype=np.int32)
+        tail_tokens = context_tokens[-self.context_size:]
+        for i, token in enumerate(tail_tokens, start=self.context_size - len(tail_tokens)):
+            if token not in self.stoi:
+                raise ValueError(f"Token {token!r} not in vocabulary.")
+            context_indices[i] = self.stoi[token]
+        return context_indices
 
     @staticmethod
     def _softmax(logits: List[float], temperature: float = 1.0) -> np.ndarray:
@@ -75,16 +112,20 @@ class OneStepLanguageModel:
         sys.stdout.write("\r" + text + "\x1b[K")
         sys.stdout.flush()
 
-    def _train_batch(self, input_indices: np.ndarray, target_indices: np.ndarray, learning_rate: float) -> float:
+    @staticmethod
+    def _print_progress_line(text: str) -> None:
+        print(text, flush=True)
+
+    def _train_batch(self, context_batch: np.ndarray, target_indices: np.ndarray, learning_rate: float) -> float:
         layer = self.net.layers[0]
-        x_batch = self._one_hot_cache[input_indices]
+        x_batch = self._context_batch_to_inputs(context_batch)
         logits = x_batch @ layer.weights.T + layer.biases
 
         logits = logits - np.max(logits, axis=1, keepdims=True)
         exps = np.exp(logits)
         probs = exps / np.sum(exps, axis=1, keepdims=True)
 
-        batch_size = max(1, input_indices.shape[0])
+        batch_size = max(1, context_batch.shape[0])
         row_indices = np.arange(batch_size)
         batch_loss = -np.log(np.maximum(1e-12, probs[row_indices, target_indices])).mean()
 
@@ -109,7 +150,7 @@ class OneStepLanguageModel:
         progress_chunks: int = 10,
         batch_size: int = 64,
     ) -> None:
-        total_pairs = len(self.pairs)
+        total_pairs = self.sample_count
         if total_pairs == 0:
             raise ValueError("Training data does not contain any adjacent token pairs.")
 
@@ -118,71 +159,94 @@ class OneStepLanguageModel:
                 f"Training {self.model_type} model on {total_pairs} pairs "
                 f"({len(self.tokens)} tokens, vocab {self.vocab_size}) for {epochs} epochs"
             )
-            self._write_progress_line("Progress: [----------------------------] 0.0%")
+            self._print_progress_line("Epoch progress: [----------------------------] 0.0%")
 
         batch_size = max(1, int(batch_size))
         chunk_count = max(1, int(progress_chunks))
         total_batches = max(1, (total_pairs + batch_size - 1) // batch_size)
-        progress_stride = max(1, total_batches // chunk_count)
+        progress_stride = 1
 
         for epoch in range(1, epochs + 1):
-            np.random.shuffle(self.pairs)
+            permutation = np.random.permutation(total_pairs)
             total_loss = 0.0
-            self._write_progress_line(f"{self._epoch_header(epoch, epochs)} start")
+            self._print_progress_line(f"{self._epoch_header(epoch, epochs)}")
 
             for batch_number, start in enumerate(range(0, total_pairs, batch_size), start=1):
-                batch_pairs = self.pairs[start:start + batch_size]
-                input_indices = batch_pairs[:, 0]
-                target_indices = batch_pairs[:, 1]
-                batch_loss = self._train_batch(input_indices, target_indices, learning_rate)
-                total_loss += batch_loss * len(batch_pairs)
+                batch_indices = permutation[start:start + batch_size]
+                batch_contexts = self.contexts[batch_indices]
+                batch_targets = self.targets[batch_indices]
+                batch_loss = self._train_batch(batch_contexts, batch_targets, learning_rate)
+                total_loss += batch_loss * len(batch_indices)
 
                 if total_pairs >= 200 and (batch_number % progress_stride == 0 or start + batch_size >= total_pairs):
-                    seen = min(total_pairs, start + len(batch_pairs))
+                    seen = min(total_pairs, start + len(batch_indices))
                     pct = (seen / total_pairs) * 100.0
                     running_loss = total_loss / seen
                     bar = self._progress_bar(seen / total_pairs)
                     self._write_progress_line(
-                        f"epoch {epoch:4d}/{epochs} {self._progress_bar(epoch / epochs)} | sub {bar} {pct:5.1f}% "
+                        f"  batch {batch_number:4d}/{total_batches:<4d} {bar} {pct:5.1f}% "
                         f"| {seen:6d}/{total_pairs:<6d} | batch loss {batch_loss:.4f} | running loss {running_loss:.4f}"
                     )
 
             if epoch % max(1, print_every) == 0 or epoch == 1 or epoch == epochs:
-                avg_loss = total_loss / len(self.pairs)
-                self._write_progress_line(
-                    f"epoch {epoch:4d}/{epochs} {self._progress_bar(epoch / epochs)} | sub {self._progress_bar(1.0)} 100.0% "
-                    f"| avg loss {avg_loss:.4f}"
+                avg_loss = total_loss / total_pairs
+                self._print_progress_line(
+                    f"  epoch end {self._progress_bar(epoch / epochs)} | avg loss {avg_loss:.4f}"
                 )
 
         sys.stdout.write("\n")
         sys.stdout.flush()
 
-    def predict_logits_and_probs(self, current_token: str, temperature: float = 1.0) -> Tuple[List[float], List[float]]:
-        if current_token not in self.stoi:
-            raise ValueError(f"Token {current_token!r} not in vocabulary.")
-
-        x = self._one_hot_cache[self.stoi[current_token]]
+    def predict_logits_and_probs_from_context(
+        self,
+        context_tokens: List[str],
+        temperature: float = 1.0,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        context_indices = self._context_tokens_to_indices(context_tokens)
+        x = self._context_indices_to_input(context_indices)
         logits = self.net.forward(x)
         probs = self._softmax(logits, temperature=temperature)
-        return logits, probs
+        return np.asarray(logits, dtype=np.float64), probs
 
-    def predict_next_distribution(self, current_token: str, temperature: float = 1.0) -> List[Tuple[str, float]]:
-        _, probs = self.predict_logits_and_probs(current_token, temperature=temperature)
+    def predict_logits_and_probs(self, current_token: str, temperature: float = 1.0) -> Tuple[List[float], List[float]]:
+        return self.predict_logits_and_probs_from_context([current_token], temperature=temperature)
+
+    def predict_next_distribution_from_context(
+        self,
+        context_tokens: List[str],
+        temperature: float = 1.0,
+    ) -> List[Tuple[str, float]]:
+        _, probs = self.predict_logits_and_probs_from_context(context_tokens, temperature=temperature)
         return [(self.itos[i], float(probs[i])) for i in range(self.vocab_size)]
 
-    def top_k_predictions(self, current_token: str, k: int = 5, temperature: float = 1.0) -> List[Tuple[str, float]]:
-        dist = self.predict_next_distribution(current_token, temperature=temperature)
+    def predict_next_distribution(self, current_token: str, temperature: float = 1.0) -> List[Tuple[str, float]]:
+        return self.predict_next_distribution_from_context([current_token], temperature=temperature)
+
+    def top_k_predictions_from_context(
+        self,
+        context_tokens: List[str],
+        k: int = 5,
+        temperature: float = 1.0,
+    ) -> List[Tuple[str, float]]:
+        dist = self.predict_next_distribution_from_context(context_tokens, temperature=temperature)
         return sorted(dist, key=lambda item: item[1], reverse=True)[: max(1, k)]
 
-    def sample_next(self, current_token: str, temperature: float = 1.0) -> str:
-        _, probs = self.predict_logits_and_probs(current_token, temperature=temperature)
+    def top_k_predictions(self, current_token: str, k: int = 5, temperature: float = 1.0) -> List[Tuple[str, float]]:
+        return self.top_k_predictions_from_context([current_token], k=k, temperature=temperature)
+
+    def sample_next_from_context(self, context_tokens: List[str], temperature: float = 1.0) -> str:
+        _, probs = self.predict_logits_and_probs_from_context(context_tokens, temperature=temperature)
         next_idx = self._sample_from_probs(probs)
         return self.itos[next_idx]
+
+    def sample_next(self, current_token: str, temperature: float = 1.0) -> str:
+        return self.sample_next_from_context([current_token], temperature=temperature)
 
     def _serialize(self) -> Dict[str, object]:
         layer = self.net.layers[0]
         return {
             "model_type": self.model_type,
+            "context_size": self.context_size,
             "tokens": self.tokens,
             "vocab": self.vocab,
             "weights": layer.weights.tolist(),
@@ -190,9 +254,9 @@ class OneStepLanguageModel:
         }
 
     @classmethod
-    def _init_from_saved_tokens(cls, tokens: List[str]):
+    def _init_from_saved_tokens(cls, tokens: List[str], context_size: int):
         model = cls.__new__(cls)
-        OneStepLanguageModel.__init__(model, tokens)
+        OneStepLanguageModel.__init__(model, tokens, context_size=context_size)
         return model
 
     def save(self, path: str) -> None:
@@ -203,7 +267,8 @@ class OneStepLanguageModel:
     @classmethod
     def _from_payload(cls, payload: Dict[str, object]):
         tokens = payload["tokens"]
-        model = cls._init_from_saved_tokens(tokens)
+        context_size = int(payload.get("context_size", 1))
+        model = cls._init_from_saved_tokens(tokens, context_size=context_size)
 
         layer = model.net.layers[0]
         saved_weights = payload["weights"]
@@ -211,6 +276,8 @@ class OneStepLanguageModel:
 
         if len(saved_weights) != len(layer.neurons):
             raise ValueError("Saved model shape does not match current network shape.")
+        if len(saved_weights) > 0 and len(saved_weights[0]) != layer.weights.shape[1]:
+            raise ValueError("Saved model input width does not match model context size.")
 
         for i, neuron in enumerate(layer.neurons):
             neuron.weights = np.asarray(saved_weights[i], dtype=np.float64)
@@ -225,11 +292,11 @@ class OneStepLanguageModel:
 class CharLanguageModel(OneStepLanguageModel):
     model_type = "char"
 
-    def __init__(self, text: str):
+    def __init__(self, text: str, context_size: int = 6):
         if len(text) < 2:
             raise ValueError("Training text must contain at least 2 characters.")
         self.text = text
-        super().__init__(list(text))
+        super().__init__(list(text), context_size=context_size)
 
     def generate(self, seed: str, length: int = 120, temperature: float = 1.0) -> str:
         if length <= 0:
@@ -243,12 +310,14 @@ class CharLanguageModel(OneStepLanguageModel):
                 raise ValueError(f"Seed contains unknown char: {ch!r}")
 
         out = list(seed)
-        current = out[-1]
+        context_tokens = out[-self.context_size:]
 
         for _ in range(length):
-            next_char = self.sample_next(current, temperature=temperature)
+            next_char = self.sample_next_from_context(context_tokens, temperature=temperature)
             out.append(next_char)
-            current = next_char
+            context_tokens.append(next_char)
+            if len(context_tokens) > self.context_size:
+                context_tokens.pop(0)
 
         return "".join(out)
 
@@ -266,12 +335,12 @@ class CharLanguageModel(OneStepLanguageModel):
 class WordLanguageModel(OneStepLanguageModel):
     model_type = "word"
 
-    def __init__(self, text: str):
+    def __init__(self, text: str, context_size: int = 4):
         tokens = self.tokenize(text)
         if len(tokens) < 2:
             raise ValueError("Training text must contain at least 2 word tokens.")
         self.text = text
-        super().__init__(tokens)
+        super().__init__(tokens, context_size=context_size)
 
     @staticmethod
     def tokenize(text: str) -> List[str]:
@@ -288,12 +357,14 @@ class WordLanguageModel(OneStepLanguageModel):
                 raise ValueError(f"Seed contains unknown token: {token!r}")
 
         out = seed_tokens[:]
-        current = out[-1]
+        context_tokens = out[-self.context_size:]
 
         for _ in range(length):
-            next_token = self.sample_next(current, temperature=temperature)
+            next_token = self.sample_next_from_context(context_tokens, temperature=temperature)
             out.append(next_token)
-            current = next_token
+            context_tokens.append(next_token)
+            if len(context_tokens) > self.context_size:
+                context_tokens.pop(0)
 
         # Compact punctuation spacing.
         text = " ".join(out)
