@@ -13,6 +13,8 @@ LM_TEMPERATURE = 0.9
 TOP_K = 5
 MIN_ZOOM = 0.4
 MAX_ZOOM = 3.5
+TOP_PANEL_HEIGHT = 150
+BOTTOM_PANEL_HEIGHT = 60
 
 
 def load_corpus_text(path):
@@ -190,6 +192,15 @@ def main():
         screen.fill((0, 0, 0))
         top_k = model.top_k_predictions(current_token, k=TOP_K, temperature=LM_TEMPERATURE)
         display_distribution(screen, font, model, current_token, LM_TEMPERATURE, camera)
+
+        # Cover network visuals under static text areas.
+        width, height = screen.get_size()
+        pygame.draw.rect(screen, (0, 0, 0), pygame.Rect(0, 0, width, TOP_PANEL_HEIGHT))
+        pygame.draw.rect(
+            screen,
+            (0, 0, 0),
+            pygame.Rect(0, height - BOTTOM_PANEL_HEIGHT, width, BOTTOM_PANEL_HEIGHT),
+        )
 
         if font is not None:
             draw_text_lines(
