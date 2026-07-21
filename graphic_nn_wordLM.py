@@ -15,6 +15,7 @@ MIN_ZOOM = 0.4
 MAX_ZOOM = 3.5
 TOP_PANEL_HEIGHT = 150
 BOTTOM_PANEL_HEIGHT = 60
+ARROW_PAN_SCREEN_FRACTION = 0.1
 
 
 def load_corpus_text(path):
@@ -189,6 +190,27 @@ def main():
                 camera["offset_x"] = 0.0
                 camera["offset_y"] = 0.0
 
+        keys = pygame.key.get_pressed()
+        pan_x = 0.0
+        pan_y = 0.0
+        if keys[pygame.K_LEFT]:
+            pan_x += 1.0
+        if keys[pygame.K_RIGHT]:
+            pan_x -= 1.0
+        if keys[pygame.K_UP]:
+            pan_y += 1.0
+        if keys[pygame.K_DOWN]:
+            pan_y -= 1.0
+
+        if pan_x != 0.0 or pan_y != 0.0:
+            width, height = screen.get_size()
+            if pan_x != 0.0 and pan_y != 0.0:
+                scale = 0.7071
+                pan_x *= scale
+                pan_y *= scale
+            camera["offset_x"] += pan_x * (width * ARROW_PAN_SCREEN_FRACTION)
+            camera["offset_y"] += pan_y * (height * ARROW_PAN_SCREEN_FRACTION)
+
         screen.fill((0, 0, 0))
         top_k = model.top_k_predictions(current_token, k=TOP_K, temperature=LM_TEMPERATURE)
         display_distribution(screen, font, model, current_token, LM_TEMPERATURE, camera)
@@ -211,7 +233,7 @@ def main():
                     f"Temperature: {LM_TEMPERATURE}",
                     f"Vocab size: {model.vocab_size}",
                     f"Zoom: {camera['zoom']:.2f}",
-                    "Pan: right-click drag | Zoom: mouse wheel | Reset: R",
+                    "Pan: right-drag or arrows | Zoom: wheel | Reset: R",
                 ],
                 x=24,
                 y=20,
