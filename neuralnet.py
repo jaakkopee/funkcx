@@ -9,6 +9,9 @@ except Exception:
     metal_backend = None
 
 
+NEURON_MIRROR_PARAM_LIMIT = 2_000_000
+
+
 class NeuralNetwork:
     def __init__(self):
         self.layers = []
@@ -33,9 +36,16 @@ class NeuralNetwork:
 
 class Layer:
     def __init__(self, num_neurons, input_size):
-        self.neurons = [Neuron(input_size) for _ in range(num_neurons)]
-        self.weights = np.vstack([neuron.weights for neuron in self.neurons]).astype(float)
-        self.biases = np.array([neuron.bias for neuron in self.neurons], dtype=float)
+        self.keep_neuron_mirror = (num_neurons * input_size) <= NEURON_MIRROR_PARAM_LIMIT
+        if self.keep_neuron_mirror:
+            self.neurons = [Neuron(input_size) for _ in range(num_neurons)]
+            self.weights = np.vstack([neuron.weights for neuron in self.neurons]).astype(np.float32)
+            self.biases = np.array([neuron.bias for neuron in self.neurons], dtype=np.float32)
+        else:
+            self.neurons = []
+            scale = 1.0 / math.sqrt(max(1, input_size))
+            self.weights = (np.random.uniform(-1.0, 1.0, size=(num_neurons, input_size)).astype(np.float32) * scale)
+            self.biases = np.random.uniform(-0.1, 0.1, size=(num_neurons,)).astype(np.float32)
         self.grad_weights = np.zeros_like(self.weights)
         self.grad_biases = np.zeros_like(self.biases)
 
@@ -67,6 +77,8 @@ class Layer:
             return None
 
     def _sync_neurons_from_matrix(self):
+        if not self.keep_neuron_mirror:
+            return
         for neuron, weights, bias in zip(self.neurons, self.weights, self.biases):
             neuron.weights = weights.copy()
             neuron.bias = float(bias)

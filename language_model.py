@@ -130,10 +130,23 @@ class OneStepLanguageModel:
     def _print_progress_line(text: str) -> None:
         print(text, flush=True)
 
-    def _train_batch(self, context_batch: np.ndarray, target_indices: np.ndarray, learning_rate: float) -> Tuple[float, str]:
+    def _train_batch(
+        self,
+        context_batch: np.ndarray,
+        target_indices: np.ndarray,
+        learning_rate: float,
+        torch_trainer=None,
+    ) -> Tuple[float, str]:
         layer = self.net.layers[0]
         x_batch = self._context_batch_to_inputs(context_batch)
         batch_size = max(1, context_batch.shape[0])
+
+        if torch_trainer is not None:
+            batch_loss = torch_trainer.train_batch(
+                inputs=x_batch.astype(np.float32, copy=False),
+                target_indices=np.asarray(target_indices, dtype=np.int64),
+            )
+            return float(batch_loss), torch_trainer.backend_name
 
         if torch_backend is not None:
             train_dense_batch = getattr(torch_backend, "train_dense_batch", None)
@@ -271,6 +284,20 @@ class OneStepLanguageModel:
         total_batches = max(1, (total_pairs + batch_size - 1) // batch_size)
         progress_stride = 1
 
+        torch_trainer = None
+        if torch_backend is not None:
+            create_dense_trainer = getattr(torch_backend, "create_dense_trainer", None)
+            if callable(create_dense_trainer):
+                layer = self.net.layers[0]
+                try:
+                    torch_trainer = create_dense_trainer(
+                        weights=layer.weights.astype(np.float32, copy=False),
+                        biases=layer.biases.astype(np.float32, copy=False),
+                        learning_rate=float(learning_rate),
+                    )
+                except Exception:
+                    torch_trainer = None
+
         for epoch in range(1, epochs + 1):
             permutation = np.random.permutation(total_pairs)
             total_loss = 0.0
@@ -281,7 +308,12 @@ class OneStepLanguageModel:
                 batch_indices = permutation[start:start + batch_size]
                 batch_contexts = self.contexts[batch_indices]
                 batch_targets = self.targets[batch_indices]
-                batch_loss, backend_name = self._train_batch(batch_contexts, batch_targets, learning_rate)
+                batch_loss, backend_name = self._train_batch(
+                    batch_contexts,
+                    batch_targets,
+                    learning_rate,
+                    torch_trainer=torch_trainer,
+                )
                 if not backend_reported:
                     print(f"Training backend: {backend_name}", flush=True)
                     backend_reported = True
@@ -302,6 +334,13 @@ class OneStepLanguageModel:
                 self._print_progress_line(
                     f"  epoch end {self._progress_bar(epoch / epochs)} | avg loss {avg_loss:.4f}"
                 )
+
+        if torch_trainer is not None:
+            layer = self.net.layers[0]
+            updated_weights, updated_biases = torch_trainer.export_parameters()
+            layer.weights = np.asarray(updated_weights, dtype=np.float32)
+            layer.biases = np.asarray(updated_biases, dtype=np.float32)
+            layer._sync_neurons_from_matrix()
 
         sys.stdout.write("\n")
         sys.stdout.flush()
@@ -383,17 +422,19 @@ class OneStepLanguageModel:
         saved_weights = payload["weights"]
         saved_biases = payload["biases"]
 
-        if len(saved_weights) != len(layer.neurons):
+        if len(saved_weights) != layer.weights.shape[0]:
             raise ValueError("Saved model shape does not match current network shape.")
         if len(saved_weights) > 0 and len(saved_weights[0]) != layer.weights.shape[1]:
             raise ValueError("Saved model input width does not match model context size.")
 
-        for i, neuron in enumerate(layer.neurons):
-            neuron.weights = np.asarray(saved_weights[i], dtype=np.float64)
-            neuron.bias = float(saved_biases[i])
+        if getattr(layer, "keep_neuron_mirror", False):
+            for i, neuron in enumerate(layer.neurons):
+                neuron.weights = np.asarray(saved_weights[i], dtype=np.float32)
+                neuron.bias = float(saved_biases[i])
 
-        layer.weights = np.asarray(saved_weights, dtype=np.float64)
-        layer.biases = np.asarray(saved_biases, dtype=np.float64)
+        layer.weights = np.asarray(saved_weights, dtype=np.float32)
+        layer.biases = np.asarray(saved_biases, dtype=np.float32)
+        layer._sync_neurons_from_matrix()
 
         return model
 

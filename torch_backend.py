@@ -7,7 +7,7 @@ MPS on macOS, otherwise it will fall back to CPU.
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Tuple
 
 import numpy as np
 
@@ -69,3 +69,38 @@ def train_dense_batch(
         float(loss.item()),
         str(device),
     )
+
+
+class DenseBatchTrainer:
+    def __init__(self, weights: np.ndarray, biases: np.ndarray, learning_rate: float):
+        if torch is None or F is None:
+            raise RuntimeError(
+                "PyTorch backend is not available. Install torch to enable the MPS/CPU training path."
+            ) from _import_error
+
+        self.device = _select_device()
+        self.weights_t = torch.as_tensor(weights, dtype=torch.float32, device=self.device).clone().detach().requires_grad_(True)
+        self.biases_t = torch.as_tensor(biases, dtype=torch.float32, device=self.device).clone().detach().requires_grad_(True)
+        self.optimizer = torch.optim.SGD([self.weights_t, self.biases_t], lr=float(learning_rate))
+        self.backend_name = f"torch ({self.device})"
+
+    def train_batch(self, inputs: np.ndarray, target_indices: np.ndarray) -> float:
+        inputs_t = torch.as_tensor(inputs, dtype=torch.float32, device=self.device)
+        target_t = torch.as_tensor(target_indices, dtype=torch.long, device=self.device)
+
+        self.optimizer.zero_grad(set_to_none=True)
+        logits = F.linear(inputs_t, self.weights_t, self.biases_t)
+        loss = F.cross_entropy(logits, target_t)
+        loss.backward()
+        self.optimizer.step()
+        return float(loss.item())
+
+    def export_parameters(self) -> Tuple[np.ndarray, np.ndarray]:
+        return (
+            self.weights_t.detach().cpu().numpy(),
+            self.biases_t.detach().cpu().numpy(),
+        )
+
+
+def create_dense_trainer(weights: np.ndarray, biases: np.ndarray, learning_rate: float) -> DenseBatchTrainer:
+    return DenseBatchTrainer(weights=weights, biases=biases, learning_rate=learning_rate)
