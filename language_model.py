@@ -119,7 +119,7 @@ class OneStepLanguageModel:
     def _train_batch(self, context_batch: np.ndarray, target_indices: np.ndarray, learning_rate: float) -> float:
         layer = self.net.layers[0]
         x_batch = self._context_batch_to_inputs(context_batch)
-        logits = x_batch @ layer.weights.T + layer.biases
+        logits = np.asarray(layer.forward(x_batch), dtype=np.float64)
 
         logits = logits - np.max(logits, axis=1, keepdims=True)
         exps = np.exp(logits)

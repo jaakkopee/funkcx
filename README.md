@@ -14,6 +14,7 @@ The project trains lightweight character-level and word-level language models on
 - Custom neural network code: a simple in-repo implementation in `neuralnet.py` and `language_model.py` rather than an external ML framework.
 - JSON persistence: saves and loads model weights such as `char_lm_weights.json`, `word_lm_weights.json`, and `nsoe.json`.
 - Text corpus input: training data can be read from `nsoe.txt` for the word-level model.
+- Optional Metal backend: an Objective-C++/pybind11 extension can accelerate dense-layer forward passes on macOS.
 
 ## Main files
 
@@ -21,6 +22,9 @@ The project trains lightweight character-level and word-level language models on
 - `neuralnet.py`: lightweight dense-layer and neuron implementation.
 - `graphic_nn.py`: character-level visualization.
 - `graphic_nn_wordLM.py`: word-level visualization using `nsoe.txt` and saved model weights.
+- `metal_backend.mm` / `metal_dense.metal`: optional native Metal dense-layer implementation.
+- `metal_backend.py`: Python wrapper that falls back cleanly when the native module is unavailable.
+- `setup.py`: build script for the optional native extension.
 
 ## How to run
 
@@ -48,6 +52,16 @@ python graphic_nn.py
 ```bash
 python language_model.py
 ```
+
+## Optional Metal backend
+
+On macOS with Xcode command line tools installed, you can build the native backend in place:
+
+```bash
+python setup.py build_ext --inplace
+```
+
+The Python code will use the Metal path automatically when the compiled module is present; otherwise it falls back to NumPy.
 
 ## Notes
 

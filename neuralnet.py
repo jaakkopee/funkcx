@@ -3,6 +3,11 @@ import random
 
 import numpy as np
 
+try:
+    import metal_backend
+except Exception:
+    metal_backend = None
+
 
 class NeuralNetwork:
     def __init__(self):
@@ -34,6 +39,26 @@ class Layer:
         self.grad_weights = np.zeros_like(self.weights)
         self.grad_biases = np.zeros_like(self.biases)
 
+    def _forward_batch_numpy(self, x_batch):
+        return x_batch @ self.weights.T + self.biases
+
+    def _forward_batch_metal(self, x_batch):
+        if metal_backend is None:
+            return None
+        is_available = getattr(metal_backend, "is_available", None)
+        dense_forward = getattr(metal_backend, "dense_forward", None)
+        if not callable(is_available) or not callable(dense_forward) or not is_available():
+            return None
+        try:
+            outputs = dense_forward(
+                self.weights.astype(np.float32, copy=False),
+                self.biases.astype(np.float32, copy=False),
+                x_batch.astype(np.float32, copy=False),
+            )
+            return np.asarray(outputs, dtype=float)
+        except Exception:
+            return None
+
     def _sync_neurons_from_matrix(self):
         for neuron, weights, bias in zip(self.neurons, self.weights, self.biases):
             neuron.weights = weights.copy()
@@ -41,8 +66,20 @@ class Layer:
 
     def forward(self, x, screen=None):
         x_array = np.asarray(x, dtype=float)
-        self.last_input = x_array
-        outputs = self.weights @ x_array + self.biases
+        if x_array.ndim == 1:
+            self.last_input = x_array
+            outputs = self._forward_batch_metal(x_array[np.newaxis, :])
+            if outputs is None:
+                outputs = self._forward_batch_numpy(x_array[np.newaxis, :])
+            outputs = np.asarray(outputs[0], dtype=float)
+        elif x_array.ndim == 2:
+            self.last_input = x_array
+            outputs = self._forward_batch_metal(x_array)
+            if outputs is None:
+                outputs = self._forward_batch_numpy(x_array)
+            outputs = np.asarray(outputs, dtype=float)
+        else:
+            raise ValueError("Layer.forward expects a 1D or 2D input array.")
 
         if screen is not None and hasattr(screen, "display"):
             for neuron, output in zip(self.neurons, outputs):
