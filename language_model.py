@@ -14,8 +14,14 @@ try:
 except Exception:
     metal_backend = None
 
+try:
+    import torch_backend
+except Exception:
+    torch_backend = None
+
 
 METAL_TILE_SIZE = 16
+MAX_METAL_LAYER_BYTES = 64 * 1024 * 1024
 
 
 class OneStepLanguageModel:
@@ -129,7 +135,32 @@ class OneStepLanguageModel:
         x_batch = self._context_batch_to_inputs(context_batch)
         batch_size = max(1, context_batch.shape[0])
 
-        if metal_backend is not None:
+        if torch_backend is not None:
+            train_dense_batch = getattr(torch_backend, "train_dense_batch", None)
+            if callable(train_dense_batch):
+                try:
+                    updated_weights, updated_biases, batch_loss = train_dense_batch(
+                        layer.weights.astype(np.float32, copy=False),
+                        layer.biases.astype(np.float32, copy=False),
+                        x_batch.astype(np.float32, copy=False),
+                        np.asarray(target_indices, dtype=np.int64),
+                        float(learning_rate),
+                    )
+                    layer.weights = np.asarray(updated_weights, dtype=float)
+                    layer.biases = np.asarray(updated_biases, dtype=float)
+                    layer._sync_neurons_from_matrix()
+                    return float(batch_loss)
+                except Exception:
+                    pass
+
+        use_metal = (
+            metal_backend is not None
+            and layer.weights.nbytes <= MAX_METAL_LAYER_BYTES
+            and layer.biases.nbytes <= MAX_METAL_LAYER_BYTES
+            and x_batch.nbytes <= MAX_METAL_LAYER_BYTES
+        )
+
+        if use_metal:
             dense_forward_tile = getattr(metal_backend, "dense_forward_tile", None)
             batch_grad_params_tile = getattr(metal_backend, "dense_batch_grad_params_tile", None)
             dense_apply_update_tile = getattr(metal_backend, "dense_apply_update_tile", None)

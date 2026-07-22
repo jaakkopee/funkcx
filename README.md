@@ -15,6 +15,7 @@ The project trains lightweight character-level and word-level language models on
 - JSON persistence: saves and loads model weights such as `char_lm_weights.json`, `word_lm_weights.json`, and `nsoe.json`.
 - Text corpus input: training data can be read from `nsoe.txt` for the word-level model.
 - Optional Metal backend: an Objective-C++/pybind11 extension can accelerate dense-layer forward passes on macOS.
+- Optional PyTorch backend: if `torch` is installed, the training step can use MPS on macOS and fall back to CPU otherwise.
 
 ## Main files
 
@@ -24,6 +25,7 @@ The project trains lightweight character-level and word-level language models on
 - `graphic_nn_wordLM.py`: word-level visualization using `nsoe.txt` and saved model weights.
 - `metal_backend.mm` / `metal_dense.metal`: optional native Metal dense-layer implementation.
 - `metal_backend.py`: Python wrapper that falls back cleanly when the native module is unavailable.
+- `torch_backend.py`: optional PyTorch training backend for the dense batch step.
 - `setup.py`: build script for the optional native extension.
 
 ## How to run
@@ -33,6 +35,12 @@ The project trains lightweight character-level and word-level language models on
 
 ```bash
 pip install numpy pygame
+```
+
+If you want the PyTorch training path, also install `torch`:
+
+```bash
+pip install torch
 ```
 
 3. Run the word-level visualizer with `nsoe.txt`:
@@ -62,6 +70,8 @@ python setup.py build_ext --inplace
 ```
 
 The Python code will use the Metal path automatically when the compiled module is present; otherwise it falls back to NumPy.
+
+If PyTorch is installed, large training batches will prefer the PyTorch MPS/CPU path before Metal.
 
 ## Notes
 
