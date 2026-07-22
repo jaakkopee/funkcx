@@ -21,6 +21,7 @@ DEFAULT_FPS = 3
 TOP_PANEL_HEIGHT = 160
 BOTTOM_PANEL_HEIGHT = 60
 PROMPT_BOX_HEIGHT = 46
+GENERATED_PREVIEW_MARGIN = 220
 
 
 def parse_args():
@@ -113,6 +114,19 @@ def compact_tokens(tokens):
     for punct in [".", ",", "!", "?", ";", ":"]:
         text = text.replace(f" {punct}", punct)
     return text
+
+
+def fit_token_tail(font, tokens, max_width):
+    if font is None or not tokens:
+        return tokens[:]
+
+    start = max(0, len(tokens) - 1)
+    while start > 0:
+        preview = compact_tokens(tokens[start:])
+        if font.size(preview)[0] <= max_width:
+            return tokens[start:]
+        start -= 1
+    return tokens[-1:]
 
 
 def build_seed_state(model, prompt_text):
@@ -208,7 +222,12 @@ def main():
             top_lines.extend([f"{tok}: {prob:.3f}" for tok, prob in top_k])
             draw_text_lines(screen, font, top_lines, x=660, y=20)
 
-            preview = compact_tokens(generated_tokens[-45:])
+            preview_tokens = fit_token_tail(
+                font,
+                generated_tokens,
+                max(1, width - 48 - GENERATED_PREVIEW_MARGIN),
+            )
+            preview = compact_tokens(preview_tokens)
             draw_text_lines(screen, font, [f"Generated: {preview}"], x=24, y=814, line_gap=22)
             prompt_label = "Prompt / seed text:"
             prompt_display = prompt_text if prompt_text else ""
