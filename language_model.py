@@ -15,6 +15,9 @@ except Exception:
     metal_backend = None
 
 
+METAL_TILE_SIZE = 64
+
+
 class OneStepLanguageModel:
     """Next-token language model with configurable context window."""
 
@@ -124,13 +127,79 @@ class OneStepLanguageModel:
     def _train_batch(self, context_batch: np.ndarray, target_indices: np.ndarray, learning_rate: float) -> float:
         layer = self.net.layers[0]
         x_batch = self._context_batch_to_inputs(context_batch)
-        logits = np.asarray(layer.forward(x_batch), dtype=np.float64)
+        batch_size = max(1, context_batch.shape[0])
 
+        if metal_backend is not None:
+            dense_forward_tile = getattr(metal_backend, "dense_forward_tile", None)
+            batch_grad_params_tile = getattr(metal_backend, "dense_batch_grad_params_tile", None)
+            dense_apply_update_tile = getattr(metal_backend, "dense_apply_update_tile", None)
+            if callable(dense_forward_tile) and callable(batch_grad_params_tile) and callable(dense_apply_update_tile):
+                tile_size = max(1, int(METAL_TILE_SIZE))
+                logits_tiles = []
+                grad_weights_tiles = []
+                grad_biases_tiles = []
+                for tile_start in range(0, layer.weights.shape[0], tile_size):
+                    tile_end = min(layer.weights.shape[0], tile_start + tile_size)
+                    weights_tile = layer.weights[tile_start:tile_end]
+                    biases_tile = layer.biases[tile_start:tile_end]
+                    tile_logits = dense_forward_tile(
+                        weights_tile.astype(np.float32, copy=False),
+                        biases_tile.astype(np.float32, copy=False),
+                        x_batch.astype(np.float32, copy=False),
+                        int(tile_start),
+                    )
+                    logits_tiles.append(np.asarray(tile_logits, dtype=np.float64))
+
+                logits = np.concatenate(logits_tiles, axis=1)
+                logits = logits - np.max(logits, axis=1, keepdims=True)
+                exps = np.exp(logits)
+                probs = exps / np.sum(exps, axis=1, keepdims=True)
+
+                row_indices = np.arange(batch_size)
+                batch_loss = -np.log(np.maximum(1e-12, probs[row_indices, target_indices])).mean()
+
+                grad_logits = probs
+                grad_logits[row_indices, target_indices] -= 1.0
+                grad_logits /= batch_size
+
+                for tile_start in range(0, layer.weights.shape[0], tile_size):
+                    tile_end = min(layer.weights.shape[0], tile_start + tile_size)
+                    tile_grad_logits = grad_logits[:, tile_start:tile_end].astype(np.float32, copy=False)
+                    tile_grad_weights, tile_grad_biases = batch_grad_params_tile(
+                        x_batch.astype(np.float32, copy=False),
+                        tile_grad_logits,
+                    )
+                    grad_weights_tiles.append(np.asarray(tile_grad_weights, dtype=float))
+                    grad_biases_tiles.append(np.asarray(tile_grad_biases, dtype=float))
+
+                updated_weights = []
+                updated_biases = []
+                for tile_index, tile_start in enumerate(range(0, layer.weights.shape[0], tile_size)):
+                    tile_end = min(layer.weights.shape[0], tile_start + tile_size)
+                    weights_tile = layer.weights[tile_start:tile_end]
+                    biases_tile = layer.biases[tile_start:tile_end]
+                    tile_updated_weights, tile_updated_biases = dense_apply_update_tile(
+                        weights_tile.astype(np.float32, copy=False),
+                        biases_tile.astype(np.float32, copy=False),
+                        grad_weights_tiles[tile_index].astype(np.float32, copy=False),
+                        grad_biases_tiles[tile_index].astype(np.float32, copy=False),
+                        float(learning_rate),
+                    )
+                    updated_weights.append(np.asarray(tile_updated_weights, dtype=float))
+                    updated_biases.append(np.asarray(tile_updated_biases, dtype=float))
+
+                layer.weights = np.vstack(updated_weights)
+                layer.biases = np.concatenate(updated_biases)
+                layer.grad_weights = np.vstack(grad_weights_tiles)
+                layer.grad_biases = np.concatenate(grad_biases_tiles)
+                layer._sync_neurons_from_matrix()
+                return float(batch_loss)
+
+        logits = np.asarray(layer.forward(x_batch), dtype=np.float64)
         logits = logits - np.max(logits, axis=1, keepdims=True)
         exps = np.exp(logits)
         probs = exps / np.sum(exps, axis=1, keepdims=True)
 
-        batch_size = max(1, context_batch.shape[0])
         row_indices = np.arange(batch_size)
         batch_loss = -np.log(np.maximum(1e-12, probs[row_indices, target_indices])).mean()
 
@@ -138,25 +207,8 @@ class OneStepLanguageModel:
         grad_logits[row_indices, target_indices] -= 1.0
         grad_logits /= batch_size
 
-        grad_weights = None
-        grad_biases = None
-        if metal_backend is not None:
-            batch_grad_params = getattr(metal_backend, "dense_batch_grad_params", None)
-            if callable(batch_grad_params):
-                try:
-                    grad_weights, grad_biases = batch_grad_params(
-                        x_batch.astype(np.float32, copy=False),
-                        grad_logits.astype(np.float32, copy=False),
-                    )
-                    grad_weights = np.asarray(grad_weights, dtype=float)
-                    grad_biases = np.asarray(grad_biases, dtype=float)
-                except Exception:
-                    grad_weights = None
-                    grad_biases = None
-
-        if grad_weights is None or grad_biases is None:
-            grad_weights = grad_logits.T @ x_batch
-            grad_biases = grad_logits.sum(axis=0)
+        grad_weights = grad_logits.T @ x_batch
+        grad_biases = grad_logits.sum(axis=0)
 
         layer.grad_weights = np.asarray(grad_weights, dtype=float)
         layer.grad_biases = np.asarray(grad_biases, dtype=float)

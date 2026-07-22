@@ -47,7 +47,14 @@ class Layer:
             return None
         is_available = getattr(metal_backend, "is_available", None)
         dense_forward = getattr(metal_backend, "dense_forward", None)
-        if not callable(is_available) or not callable(dense_forward) or not is_available():
+        can_offload_dense = getattr(metal_backend, "can_offload_dense", None)
+        if (
+            not callable(is_available)
+            or not callable(dense_forward)
+            or not callable(can_offload_dense)
+            or not is_available()
+            or not can_offload_dense(self.weights, self.biases, x_batch)
+        ):
             return None
         try:
             outputs = dense_forward(
@@ -96,7 +103,8 @@ class Layer:
         grad_array = np.asarray(grad, dtype=float)
         if metal_backend is not None:
             dense_backward = getattr(metal_backend, "dense_backward", None)
-            if callable(dense_backward) and self.last_input is not None:
+            can_offload_dense = getattr(metal_backend, "can_offload_dense", None)
+            if callable(dense_backward) and callable(can_offload_dense) and self.last_input is not None and can_offload_dense(self.weights, self.last_input, grad_array):
                 try:
                     grad_input, grad_weights, grad_biases = dense_backward(
                         self.weights.astype(np.float32, copy=False),
@@ -115,7 +123,8 @@ class Layer:
     def update_params(self, learning_rate):
         if metal_backend is not None:
             dense_apply_update = getattr(metal_backend, "dense_apply_update", None)
-            if callable(dense_apply_update):
+            can_offload_dense = getattr(metal_backend, "can_offload_dense", None)
+            if callable(dense_apply_update) and callable(can_offload_dense) and can_offload_dense(self.weights, self.biases, self.grad_weights, self.grad_biases):
                 try:
                     self.weights, self.biases = dense_apply_update(
                         self.weights.astype(np.float32, copy=False),

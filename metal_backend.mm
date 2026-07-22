@@ -128,6 +128,80 @@ kernel void dense_batch_grad_params(
         grad_biases[tid] = sum;
     }
 }
+
+kernel void dense_forward_tile(
+    const device float *weights [[buffer(0)]],
+    const device float *biases [[buffer(1)]],
+    const device float *inputs [[buffer(2)]],
+    device float *outputs [[buffer(3)]],
+    constant uint &input_size [[buffer(4)]],
+    constant uint &tile_output_size [[buffer(5)]],
+    constant uint &batch_size [[buffer(6)]],
+    constant uint &output_offset [[buffer(7)]],
+    uint tid [[thread_position_in_grid]]) {
+    const uint total = batch_size * tile_output_size;
+    if (tid >= total) {
+        return;
+    }
+
+    const uint row = tid / tile_output_size;
+    const uint col = tid % tile_output_size;
+    const uint global_col = output_offset + col;
+    const device float *row_inputs = inputs + (row * input_size);
+    const device float *row_weights = weights + (col * input_size);
+
+    float sum = biases[col];
+    for (uint i = 0; i < input_size; ++i) {
+        sum += row_inputs[i] * row_weights[i];
+    }
+    outputs[(row * tile_output_size) + col] = sum;
+}
+
+kernel void dense_batch_grad_params_tile(
+    const device float *inputs [[buffer(0)]],
+    const device float *grad_output [[buffer(1)]],
+    device float *grad_weights [[buffer(2)]],
+    device float *grad_biases [[buffer(3)]],
+    constant uint &input_size [[buffer(4)]],
+    constant uint &tile_output_size [[buffer(5)]],
+    constant uint &batch_size [[buffer(6)]],
+    uint tid [[thread_position_in_grid]]) {
+    const uint total_weights = input_size * tile_output_size;
+    if (tid < total_weights) {
+        const uint row = tid / input_size;
+        const uint col = tid % input_size;
+        float sum = 0.0f;
+        for (uint sample = 0; sample < batch_size; ++sample) {
+            sum += grad_output[(sample * tile_output_size) + row] * inputs[(sample * input_size) + col];
+        }
+        grad_weights[tid] = sum;
+    }
+    if (tid < tile_output_size) {
+        float sum = 0.0f;
+        for (uint sample = 0; sample < batch_size; ++sample) {
+            sum += grad_output[(sample * tile_output_size) + tid];
+        }
+        grad_biases[tid] = sum;
+    }
+}
+
+kernel void dense_apply_update_tile(
+    device float *weights [[buffer(0)]],
+    device float *biases [[buffer(1)]],
+    const device float *grad_weights [[buffer(2)]],
+    const device float *grad_biases [[buffer(3)]],
+    constant float &learning_rate [[buffer(4)]],
+    constant uint &input_size [[buffer(5)]],
+    constant uint &tile_output_size [[buffer(6)]],
+    uint tid [[thread_position_in_grid]]) {
+    const uint total_weights = input_size * tile_output_size;
+    if (tid < total_weights) {
+        weights[tid] -= learning_rate * grad_weights[tid];
+    }
+    if (tid < tile_output_size) {
+        biases[tid] -= learning_rate * grad_biases[tid];
+    }
+}
 )METAL";
 
 class MetalDenseBackend {
@@ -147,17 +221,24 @@ public:
             }
 
             id<MTLFunction> forward_function = [library_ newFunctionWithName:@"dense_forward"];
+            id<MTLFunction> forward_tile_function = [library_ newFunctionWithName:@"dense_forward_tile"];
             id<MTLFunction> backward_input_function = [library_ newFunctionWithName:@"dense_backward_input"];
             id<MTLFunction> backward_params_function = [library_ newFunctionWithName:@"dense_backward_params"];
             id<MTLFunction> apply_update_function = [library_ newFunctionWithName:@"dense_apply_update"];
             id<MTLFunction> batch_grad_params_function = [library_ newFunctionWithName:@"dense_batch_grad_params"];
-            if (!forward_function || !backward_input_function || !backward_params_function || !apply_update_function || !batch_grad_params_function) {
+            id<MTLFunction> batch_grad_params_tile_function = [library_ newFunctionWithName:@"dense_batch_grad_params_tile"];
+            id<MTLFunction> apply_update_tile_function = [library_ newFunctionWithName:@"dense_apply_update_tile"];
+            if (!forward_function || !forward_tile_function || !backward_input_function || !backward_params_function || !apply_update_function || !batch_grad_params_function || !batch_grad_params_tile_function || !apply_update_tile_function) {
                 throw std::runtime_error("Could not find one or more dense kernels in Metal library.");
             }
 
             pipeline_ = [device_ newComputePipelineStateWithFunction:forward_function error:&error];
             if (!pipeline_) {
                 throw std::runtime_error(make_error_message("Failed to create Metal compute pipeline", error));
+            }
+            forward_tile_pipeline_ = [device_ newComputePipelineStateWithFunction:forward_tile_function error:&error];
+            if (!forward_tile_pipeline_) {
+                throw std::runtime_error(make_error_message("Failed to create forward-tile pipeline", error));
             }
             backward_input_pipeline_ = [device_ newComputePipelineStateWithFunction:backward_input_function error:&error];
             if (!backward_input_pipeline_) {
@@ -171,9 +252,17 @@ public:
             if (!batch_grad_params_pipeline_) {
                 throw std::runtime_error(make_error_message("Failed to create batch-grad-params pipeline", error));
             }
+            batch_grad_params_tile_pipeline_ = [device_ newComputePipelineStateWithFunction:batch_grad_params_tile_function error:&error];
+            if (!batch_grad_params_tile_pipeline_) {
+                throw std::runtime_error(make_error_message("Failed to create batch-grad-params-tile pipeline", error));
+            }
             update_pipeline_ = [device_ newComputePipelineStateWithFunction:apply_update_function error:&error];
             if (!update_pipeline_) {
                 throw std::runtime_error(make_error_message("Failed to create update pipeline", error));
+            }
+            update_tile_pipeline_ = [device_ newComputePipelineStateWithFunction:apply_update_tile_function error:&error];
+            if (!update_tile_pipeline_) {
+                throw std::runtime_error(make_error_message("Failed to create update-tile pipeline", error));
             }
 
             command_queue_ = [device_ newCommandQueue];
@@ -184,7 +273,7 @@ public:
     }
 
     bool available() const {
-        return device_ != nil && pipeline_ != nil && backward_input_pipeline_ != nil && backward_params_pipeline_ != nil && batch_grad_params_pipeline_ != nil && update_pipeline_ != nil && command_queue_ != nil;
+        return device_ != nil && pipeline_ != nil && forward_tile_pipeline_ != nil && backward_input_pipeline_ != nil && backward_params_pipeline_ != nil && batch_grad_params_pipeline_ != nil && batch_grad_params_tile_pipeline_ != nil && update_pipeline_ != nil && update_tile_pipeline_ != nil && command_queue_ != nil;
     }
 
     py::array_t<float> dense_forward(
@@ -704,6 +793,199 @@ public:
         return py::make_tuple(grad_weights, grad_biases);
     }
 
+    py::array_t<float> dense_forward_tile(
+        py::array_t<float, py::array::c_style | py::array::forcecast> weights_tile,
+        py::array_t<float, py::array::c_style | py::array::forcecast> biases_tile,
+        py::array_t<float, py::array::c_style | py::array::forcecast> inputs,
+        unsigned int output_offset) {
+        auto weights_info = weights_tile.request();
+        auto biases_info = biases_tile.request();
+        auto inputs_info = inputs.request();
+
+        if (weights_info.ndim != 2 || biases_info.ndim != 1) {
+            throw std::runtime_error("weights_tile must be 2D and biases_tile must be 1D.");
+        }
+        if (inputs_info.ndim != 1 && inputs_info.ndim != 2) {
+            throw std::runtime_error("inputs must be a 1D or 2D array.");
+        }
+
+        const auto tile_output_size = static_cast<NSUInteger>(weights_info.shape[0]);
+        const auto input_size = static_cast<NSUInteger>(weights_info.shape[1]);
+        if (static_cast<NSUInteger>(biases_info.shape[0]) != tile_output_size) {
+            throw std::runtime_error("biases_tile length must match tile output size.");
+        }
+
+        const auto batch_size = inputs_info.ndim == 1 ? static_cast<NSUInteger>(1) : static_cast<NSUInteger>(inputs_info.shape[0]);
+        const auto input_width = inputs_info.ndim == 1 ? static_cast<NSUInteger>(inputs_info.shape[0]) : static_cast<NSUInteger>(inputs_info.shape[1]);
+        if (input_width != input_size) {
+            throw std::runtime_error("inputs width must match the layer input size.");
+        }
+
+        py::array_t<float> result(
+            inputs_info.ndim == 1
+                ? std::vector<py::ssize_t>{static_cast<py::ssize_t>(tile_output_size)}
+                : std::vector<py::ssize_t>{static_cast<py::ssize_t>(batch_size), static_cast<py::ssize_t>(tile_output_size)}
+        );
+
+        @autoreleasepool {
+            id<MTLBuffer> weights_buffer = [device_ newBufferWithBytes:weights_info.ptr length:weights_info.size options:MTLResourceStorageModeShared];
+            id<MTLBuffer> biases_buffer = [device_ newBufferWithBytes:biases_info.ptr length:biases_info.size options:MTLResourceStorageModeShared];
+            id<MTLBuffer> inputs_buffer = [device_ newBufferWithBytes:inputs_info.ptr length:inputs_info.size options:MTLResourceStorageModeShared];
+            id<MTLBuffer> outputs_buffer = [device_ newBufferWithLength:result.nbytes() options:MTLResourceStorageModeShared];
+            if (!weights_buffer || !biases_buffer || !inputs_buffer || !outputs_buffer) {
+                throw std::runtime_error("Failed to create Metal buffers for tiled forward.");
+            }
+
+            id<MTLCommandBuffer> command_buffer = [command_queue_ commandBuffer];
+            id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+            if (!command_buffer || !encoder) {
+                throw std::runtime_error("Failed to create Metal command encoder for tiled forward.");
+            }
+
+            [encoder setComputePipelineState:forward_tile_pipeline_];
+            [encoder setBuffer:weights_buffer offset:0 atIndex:0];
+            [encoder setBuffer:biases_buffer offset:0 atIndex:1];
+            [encoder setBuffer:inputs_buffer offset:0 atIndex:2];
+            [encoder setBuffer:outputs_buffer offset:0 atIndex:3];
+            [encoder setBytes:&input_size length:sizeof(input_size) atIndex:4];
+            [encoder setBytes:&tile_output_size length:sizeof(tile_output_size) atIndex:5];
+            [encoder setBytes:&batch_size length:sizeof(batch_size) atIndex:6];
+            [encoder setBytes:&output_offset length:sizeof(output_offset) atIndex:7];
+
+            NSUInteger total = batch_size * tile_output_size;
+            NSUInteger threads_per_group = std::max<NSUInteger>(1, std::min<NSUInteger>(forward_tile_pipeline_.maxTotalThreadsPerThreadgroup, std::max<NSUInteger>(1, total)));
+            [encoder dispatchThreads:MTLSizeMake(total, 1, 1) threadsPerThreadgroup:MTLSizeMake(threads_per_group, 1, 1)];
+            [encoder endEncoding];
+            [command_buffer commit];
+            [command_buffer waitUntilCompleted];
+            if (command_buffer.error != nil) {
+                throw std::runtime_error(make_error_message("Metal tiled forward failed", command_buffer.error));
+            }
+
+            std::memcpy(result.mutable_data(), outputs_buffer.contents, result.nbytes());
+        }
+
+        return result;
+    }
+
+    py::tuple dense_batch_grad_params_tile(
+        py::array_t<float, py::array::c_style | py::array::forcecast> inputs,
+        py::array_t<float, py::array::c_style | py::array::forcecast> grad_output) {
+        auto inputs_info = inputs.request();
+        auto grad_output_info = grad_output.request();
+
+        if (inputs_info.ndim != 2 || grad_output_info.ndim != 2) {
+            throw std::runtime_error("inputs and grad_output must be 2D arrays.");
+        }
+        const auto batch_size = static_cast<NSUInteger>(inputs_info.shape[0]);
+        const auto input_size = static_cast<NSUInteger>(inputs_info.shape[1]);
+        const auto tile_output_size = static_cast<NSUInteger>(grad_output_info.shape[1]);
+        if (static_cast<NSUInteger>(grad_output_info.shape[0]) != batch_size) {
+            throw std::runtime_error("grad_output batch size must match inputs batch size.");
+        }
+
+        py::array_t<float> grad_weights(std::vector<py::ssize_t>{static_cast<py::ssize_t>(tile_output_size), static_cast<py::ssize_t>(input_size)});
+        py::array_t<float> grad_biases(std::vector<py::ssize_t>{static_cast<py::ssize_t>(tile_output_size)});
+
+        @autoreleasepool {
+            id<MTLBuffer> inputs_buffer = [device_ newBufferWithBytes:inputs_info.ptr length:inputs_info.size options:MTLResourceStorageModeShared];
+            id<MTLBuffer> grad_output_buffer = [device_ newBufferWithBytes:grad_output_info.ptr length:grad_output_info.size options:MTLResourceStorageModeShared];
+            id<MTLBuffer> grad_weights_buffer = [device_ newBufferWithLength:grad_weights.nbytes() options:MTLResourceStorageModeShared];
+            id<MTLBuffer> grad_biases_buffer = [device_ newBufferWithLength:grad_biases.nbytes() options:MTLResourceStorageModeShared];
+            if (!inputs_buffer || !grad_output_buffer || !grad_weights_buffer || !grad_biases_buffer) {
+                throw std::runtime_error("Failed to create Metal buffers for tiled batch gradients.");
+            }
+
+            id<MTLCommandBuffer> command_buffer = [command_queue_ commandBuffer];
+            id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+            if (!command_buffer || !encoder) {
+                throw std::runtime_error("Failed to create Metal command encoder for tiled batch gradients.");
+            }
+
+            [encoder setComputePipelineState:batch_grad_params_tile_pipeline_];
+            [encoder setBuffer:inputs_buffer offset:0 atIndex:0];
+            [encoder setBuffer:grad_output_buffer offset:0 atIndex:1];
+            [encoder setBuffer:grad_weights_buffer offset:0 atIndex:2];
+            [encoder setBuffer:grad_biases_buffer offset:0 atIndex:3];
+            [encoder setBytes:&input_size length:sizeof(input_size) atIndex:4];
+            [encoder setBytes:&tile_output_size length:sizeof(tile_output_size) atIndex:5];
+            [encoder setBytes:&batch_size length:sizeof(batch_size) atIndex:6];
+
+            NSUInteger total = std::max<NSUInteger>(tile_output_size * input_size, tile_output_size);
+            NSUInteger threads_per_group = std::max<NSUInteger>(1, std::min<NSUInteger>(batch_grad_params_tile_pipeline_.maxTotalThreadsPerThreadgroup, std::max<NSUInteger>(1, total)));
+            [encoder dispatchThreads:MTLSizeMake(total, 1, 1) threadsPerThreadgroup:MTLSizeMake(threads_per_group, 1, 1)];
+            [encoder endEncoding];
+            [command_buffer commit];
+            [command_buffer waitUntilCompleted];
+            if (command_buffer.error != nil) {
+                throw std::runtime_error(make_error_message("Metal tiled batch-grad failed", command_buffer.error));
+            }
+
+            std::memcpy(grad_weights.mutable_data(), grad_weights_buffer.contents, grad_weights.nbytes());
+            std::memcpy(grad_biases.mutable_data(), grad_biases_buffer.contents, grad_biases.nbytes());
+        }
+
+        return py::make_tuple(grad_weights, grad_biases);
+    }
+
+    py::tuple dense_apply_update_tile(
+        py::array_t<float, py::array::c_style | py::array::forcecast> weights_tile,
+        py::array_t<float, py::array::c_style | py::array::forcecast> biases_tile,
+        py::array_t<float, py::array::c_style | py::array::forcecast> grad_weights,
+        py::array_t<float, py::array::c_style | py::array::forcecast> grad_biases,
+        float learning_rate) {
+        auto weights_info = weights_tile.request();
+        auto biases_info = biases_tile.request();
+        auto grad_weights_info = grad_weights.request();
+        auto grad_biases_info = grad_biases.request();
+
+        const auto tile_output_size = static_cast<NSUInteger>(weights_info.shape[0]);
+        const auto input_size = static_cast<NSUInteger>(weights_info.shape[1]);
+
+        py::array_t<float> updated_weights(std::vector<py::ssize_t>{static_cast<py::ssize_t>(tile_output_size), static_cast<py::ssize_t>(input_size)});
+        py::array_t<float> updated_biases(std::vector<py::ssize_t>{static_cast<py::ssize_t>(tile_output_size)});
+
+        @autoreleasepool {
+            id<MTLBuffer> weights_buffer = [device_ newBufferWithBytes:weights_info.ptr length:weights_info.size options:MTLResourceStorageModeShared];
+            id<MTLBuffer> biases_buffer = [device_ newBufferWithBytes:biases_info.ptr length:biases_info.size options:MTLResourceStorageModeShared];
+            id<MTLBuffer> grad_weights_buffer = [device_ newBufferWithBytes:grad_weights_info.ptr length:grad_weights_info.size options:MTLResourceStorageModeShared];
+            id<MTLBuffer> grad_biases_buffer = [device_ newBufferWithBytes:grad_biases_info.ptr length:grad_biases_info.size options:MTLResourceStorageModeShared];
+            if (!weights_buffer || !biases_buffer || !grad_weights_buffer || !grad_biases_buffer) {
+                throw std::runtime_error("Failed to create Metal buffers for tiled parameter update.");
+            }
+
+            id<MTLCommandBuffer> command_buffer = [command_queue_ commandBuffer];
+            id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+            if (!command_buffer || !encoder) {
+                throw std::runtime_error("Failed to create Metal command encoder for tiled update.");
+            }
+
+            [encoder setComputePipelineState:update_tile_pipeline_];
+            [encoder setBuffer:weights_buffer offset:0 atIndex:0];
+            [encoder setBuffer:biases_buffer offset:0 atIndex:1];
+            [encoder setBuffer:grad_weights_buffer offset:0 atIndex:2];
+            [encoder setBuffer:grad_biases_buffer offset:0 atIndex:3];
+            [encoder setBytes:&learning_rate length:sizeof(learning_rate) atIndex:4];
+            [encoder setBytes:&input_size length:sizeof(input_size) atIndex:5];
+            [encoder setBytes:&tile_output_size length:sizeof(tile_output_size) atIndex:6];
+
+            NSUInteger total = input_size * tile_output_size;
+            NSUInteger threads_per_group = std::max<NSUInteger>(1, std::min<NSUInteger>(update_tile_pipeline_.maxTotalThreadsPerThreadgroup, std::max<NSUInteger>(1, total)));
+            [encoder dispatchThreads:MTLSizeMake(total, 1, 1) threadsPerThreadgroup:MTLSizeMake(threads_per_group, 1, 1)];
+            [encoder endEncoding];
+            [command_buffer commit];
+            [command_buffer waitUntilCompleted];
+            if (command_buffer.error != nil) {
+                throw std::runtime_error(make_error_message("Metal tiled update failed", command_buffer.error));
+            }
+
+            std::memcpy(updated_weights.mutable_data(), weights_buffer.contents, updated_weights.nbytes());
+            std::memcpy(updated_biases.mutable_data(), biases_buffer.contents, updated_biases.nbytes());
+        }
+
+        return py::make_tuple(updated_weights, updated_biases);
+    }
+
 private:
     static std::string make_error_message(const char *prefix, NSError *error) {
         if (error == nil) {
@@ -718,10 +1000,13 @@ private:
     id<MTLDevice> device_ = nil;
     id<MTLLibrary> library_ = nil;
     id<MTLComputePipelineState> pipeline_ = nil;
+    id<MTLComputePipelineState> forward_tile_pipeline_ = nil;
     id<MTLComputePipelineState> backward_input_pipeline_ = nil;
     id<MTLComputePipelineState> backward_params_pipeline_ = nil;
     id<MTLComputePipelineState> batch_grad_params_pipeline_ = nil;
+    id<MTLComputePipelineState> batch_grad_params_tile_pipeline_ = nil;
     id<MTLComputePipelineState> update_pipeline_ = nil;
+    id<MTLComputePipelineState> update_tile_pipeline_ = nil;
     id<MTLCommandQueue> command_queue_ = nil;
 };
 
@@ -755,5 +1040,22 @@ PYBIND11_MODULE(_metal_nn, m) {
     m.def("dense_batch_grad_params", [](py::array_t<float, py::array::c_style | py::array::forcecast> inputs,
                                           py::array_t<float, py::array::c_style | py::array::forcecast> grad_output) {
         return backend().dense_batch_grad_params(std::move(inputs), std::move(grad_output));
+    });
+    m.def("dense_forward_tile", [](py::array_t<float, py::array::c_style | py::array::forcecast> weights_tile,
+                                     py::array_t<float, py::array::c_style | py::array::forcecast> biases_tile,
+                                     py::array_t<float, py::array::c_style | py::array::forcecast> inputs,
+                                     unsigned int output_offset) {
+        return backend().dense_forward_tile(std::move(weights_tile), std::move(biases_tile), std::move(inputs), output_offset);
+    });
+    m.def("dense_batch_grad_params_tile", [](py::array_t<float, py::array::c_style | py::array::forcecast> inputs,
+                                               py::array_t<float, py::array::c_style | py::array::forcecast> grad_output) {
+        return backend().dense_batch_grad_params_tile(std::move(inputs), std::move(grad_output));
+    });
+    m.def("dense_apply_update_tile", [](py::array_t<float, py::array::c_style | py::array::forcecast> weights_tile,
+                                          py::array_t<float, py::array::c_style | py::array::forcecast> biases_tile,
+                                          py::array_t<float, py::array::c_style | py::array::forcecast> grad_weights,
+                                          py::array_t<float, py::array::c_style | py::array::forcecast> grad_biases,
+                                          float learning_rate) {
+        return backend().dense_apply_update_tile(std::move(weights_tile), std::move(biases_tile), std::move(grad_weights), std::move(grad_biases), learning_rate);
     });
 }
