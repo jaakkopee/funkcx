@@ -26,6 +26,10 @@ def is_available() -> bool:
     return torch is not None
 
 
+def get_preferred_device_name() -> str:
+    return str(_select_device())
+
+
 def _select_device() -> "torch.device":
     if torch is None:
         raise RuntimeError("PyTorch is not installed.") from _import_error

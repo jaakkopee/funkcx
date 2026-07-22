@@ -148,6 +148,83 @@ class OneStepLanguageModel:
     def _print_progress_line(text: str) -> None:
         print(text, flush=True)
 
+    def _resolve_backend_summary(self, sample_batch_size: int) -> str:
+        layer = self.net.layers[0]
+        input_width = self.vocab_size * self.context_size
+        sample_input_bytes = int(sample_batch_size) * input_width * np.dtype(np.float32).itemsize
+
+        # Default assumption is CPU unless a faster backend is clearly available.
+        backend = "cpu"
+        details = []
+
+        if torch_backend is not None:
+            is_available = getattr(torch_backend, "is_available", None)
+            if callable(is_available) and is_available():
+                backend = "torch"
+                get_device_name = getattr(torch_backend, "get_preferred_device_name", None)
+                if callable(get_device_name):
+                    try:
+                        details.append(f"device={get_device_name()}")
+                    except Exception:
+                        details.append("device=unknown")
+
+        if backend == "cpu" and metal_backend is not None:
+            is_available = getattr(metal_backend, "is_available", None)
+            if callable(is_available):
+                try:
+                    if is_available():
+                        can_fit_layer = (
+                            layer.weights.nbytes <= MAX_METAL_LAYER_BYTES
+                            and layer.biases.nbytes <= MAX_METAL_LAYER_BYTES
+                            and sample_input_bytes <= MAX_METAL_LAYER_BYTES
+                        )
+                        if can_fit_layer:
+                            backend = "metal"
+                            details.append(f"tile_size={METAL_TILE_SIZE}")
+                        else:
+                            details.append("metal_skipped=layer_or_batch_too_large")
+                except Exception:
+                    details.append("metal_status=error")
+
+        if backend == "cpu" and not details:
+            details.append("reason=no_accelerator_available")
+
+        return backend + (f" ({', '.join(details)})" if details else "")
+
+    def _print_training_configuration(
+        self,
+        epochs: int,
+        learning_rate: float,
+        print_every: int,
+        progress_chunks: int,
+        batch_size: int,
+    ) -> None:
+        layer = self.net.layers[0]
+        input_width = self.vocab_size * self.context_size
+        approx_params = int(layer.weights.size + layer.biases.size)
+        one_hot_cache_enabled = self._one_hot_cache is not None
+        backend_summary = self._resolve_backend_summary(batch_size)
+
+        print("Training configuration:", flush=True)
+        print(f"  model_type={self.model_type}", flush=True)
+        print(f"  context_size={self.context_size}", flush=True)
+        print(f"  vocab_size={self.vocab_size}", flush=True)
+        print(f"  sample_count={self.sample_count}", flush=True)
+        print(f"  input_width={input_width}", flush=True)
+        print(f"  layer_shape={layer.weights.shape[0]}x{layer.weights.shape[1]}", flush=True)
+        print(f"  parameter_count={approx_params}", flush=True)
+        print(f"  dtype={layer.weights.dtype}", flush=True)
+        print(f"  epochs={epochs}", flush=True)
+        print(f"  learning_rate={learning_rate}", flush=True)
+        print(f"  batch_size={batch_size}", flush=True)
+        print(f"  print_every={print_every}", flush=True)
+        print(f"  progress_chunks={progress_chunks}", flush=True)
+        print(f"  one_hot_cache_enabled={one_hot_cache_enabled}", flush=True)
+        print(f"  one_hot_cache_vocab_threshold={ONE_HOT_CACHE_MAX_VOCAB}", flush=True)
+        print(f"  metal_tile_size={METAL_TILE_SIZE}", flush=True)
+        print(f"  max_metal_layer_bytes={MAX_METAL_LAYER_BYTES}", flush=True)
+        print(f"  backend_selected={backend_summary}", flush=True)
+
     def _train_batch(
         self,
         context_batch: np.ndarray,
@@ -301,6 +378,14 @@ class OneStepLanguageModel:
         chunk_count = max(1, int(progress_chunks))
         total_batches = max(1, (total_pairs + batch_size - 1) // batch_size)
         progress_stride = 1
+
+        self._print_training_configuration(
+            epochs=epochs,
+            learning_rate=learning_rate,
+            print_every=print_every,
+            progress_chunks=chunk_count,
+            batch_size=batch_size,
+        )
 
         torch_trainer = None
         if torch_backend is not None:
