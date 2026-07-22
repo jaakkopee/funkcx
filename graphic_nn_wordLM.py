@@ -46,7 +46,7 @@ def load_or_train_word_model():
     corpus = load_corpus_text(CORPUS_PATH)
     model = WordLanguageModel(corpus, context_size=4)
     summarize_corpus(corpus, model)
-    model.train(epochs=140, learning_rate=0.08, print_every=10, progress_chunks=12)
+    model.train(epochs=140, learning_rate=0.08, print_every=10, progress_chunks=12, batch_size=8)
     model.save(MODEL_PATH)
     print(f"Saved trained model to {MODEL_PATH}")
     return model

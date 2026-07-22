@@ -22,6 +22,7 @@ except Exception:
 
 METAL_TILE_SIZE = 16
 MAX_METAL_LAYER_BYTES = 64 * 1024 * 1024
+ONE_HOT_CACHE_MAX_VOCAB = 4096
 
 
 class OneStepLanguageModel:
@@ -62,16 +63,28 @@ class OneStepLanguageModel:
 
         self.sample_count = sample_count
 
-        self._one_hot_cache = np.eye(self.vocab_size, dtype=np.float32)
+        if self.vocab_size <= ONE_HOT_CACHE_MAX_VOCAB:
+            self._one_hot_cache = np.eye(self.vocab_size, dtype=np.float32)
+        else:
+            self._one_hot_cache = None
 
     def one_hot(self, index: int) -> List[float]:
-        return self._one_hot_cache[index]
+        if self._one_hot_cache is not None:
+            return self._one_hot_cache[index]
+        vec = np.zeros((self.vocab_size,), dtype=np.float32)
+        vec[index] = 1.0
+        return vec
 
     def _context_indices_to_input(self, context_indices: np.ndarray) -> np.ndarray:
         context_input = np.zeros((self.context_size, self.vocab_size), dtype=np.float32)
         valid = context_indices >= 0
         if np.any(valid):
-            context_input[valid] = self._one_hot_cache[context_indices[valid]]
+            if self._one_hot_cache is not None:
+                context_input[valid] = self._one_hot_cache[context_indices[valid]]
+            else:
+                row_indices = np.where(valid)[0]
+                token_indices = context_indices[row_indices]
+                context_input[row_indices, token_indices] = 1.0
         return context_input.reshape(self.context_size * self.vocab_size)
 
     def _context_batch_to_inputs(self, context_batch: np.ndarray) -> np.ndarray:
@@ -79,7 +92,12 @@ class OneStepLanguageModel:
         context_input = np.zeros((batch_size, self.context_size, self.vocab_size), dtype=np.float32)
         valid = context_batch >= 0
         if np.any(valid):
-            context_input[valid] = self._one_hot_cache[context_batch[valid]]
+            if self._one_hot_cache is not None:
+                context_input[valid] = self._one_hot_cache[context_batch[valid]]
+            else:
+                batch_rows, ctx_rows = np.where(valid)
+                token_indices = context_batch[batch_rows, ctx_rows]
+                context_input[batch_rows, ctx_rows, token_indices] = 1.0
         return context_input.reshape(batch_size, self.context_size * self.vocab_size)
 
     def _context_tokens_to_indices(self, context_tokens: List[str]) -> np.ndarray:
@@ -297,6 +315,12 @@ class OneStepLanguageModel:
                     )
                 except Exception:
                     torch_trainer = None
+
+        if torch_trainer is not None:
+            # Keep only tiny placeholders while torch owns the large parameter tensors.
+            layer = self.net.layers[0]
+            layer.weights = np.empty((0, 0), dtype=np.float32)
+            layer.biases = np.empty((0,), dtype=np.float32)
 
         for epoch in range(1, epochs + 1):
             permutation = np.random.permutation(total_pairs)
