@@ -9,6 +9,11 @@ import numpy as np
 
 import neuralnet
 
+try:
+    import metal_backend
+except Exception:
+    metal_backend = None
+
 
 class OneStepLanguageModel:
     """Next-token language model with configurable context window."""
@@ -133,12 +138,29 @@ class OneStepLanguageModel:
         grad_logits[row_indices, target_indices] -= 1.0
         grad_logits /= batch_size
 
-        grad_weights = grad_logits.T @ x_batch
-        grad_biases = grad_logits.sum(axis=0)
+        grad_weights = None
+        grad_biases = None
+        if metal_backend is not None:
+            batch_grad_params = getattr(metal_backend, "dense_batch_grad_params", None)
+            if callable(batch_grad_params):
+                try:
+                    grad_weights, grad_biases = batch_grad_params(
+                        x_batch.astype(np.float32, copy=False),
+                        grad_logits.astype(np.float32, copy=False),
+                    )
+                    grad_weights = np.asarray(grad_weights, dtype=float)
+                    grad_biases = np.asarray(grad_biases, dtype=float)
+                except Exception:
+                    grad_weights = None
+                    grad_biases = None
 
-        layer.weights -= learning_rate * grad_weights
-        layer.biases -= learning_rate * grad_biases
-        layer._sync_neurons_from_matrix()
+        if grad_weights is None or grad_biases is None:
+            grad_weights = grad_logits.T @ x_batch
+            grad_biases = grad_logits.sum(axis=0)
+
+        layer.grad_weights = np.asarray(grad_weights, dtype=float)
+        layer.grad_biases = np.asarray(grad_biases, dtype=float)
+        layer.update_params(learning_rate)
 
         return float(batch_loss)
 

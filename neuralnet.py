@@ -94,11 +94,42 @@ class Layer:
 
     def backward(self, grad):
         grad_array = np.asarray(grad, dtype=float)
+        if metal_backend is not None:
+            dense_backward = getattr(metal_backend, "dense_backward", None)
+            if callable(dense_backward) and self.last_input is not None:
+                try:
+                    grad_input, grad_weights, grad_biases = dense_backward(
+                        self.weights.astype(np.float32, copy=False),
+                        np.asarray(self.last_input, dtype=np.float32),
+                        grad_array.astype(np.float32, copy=False),
+                    )
+                    self.grad_weights = np.asarray(grad_weights, dtype=float)
+                    self.grad_biases = np.asarray(grad_biases, dtype=float)
+                    return np.asarray(grad_input, dtype=float)
+                except Exception:
+                    pass
         self.grad_weights = np.outer(grad_array, self.last_input)
         self.grad_biases = grad_array
         return self.weights.T @ grad_array
 
     def update_params(self, learning_rate):
+        if metal_backend is not None:
+            dense_apply_update = getattr(metal_backend, "dense_apply_update", None)
+            if callable(dense_apply_update):
+                try:
+                    self.weights, self.biases = dense_apply_update(
+                        self.weights.astype(np.float32, copy=False),
+                        self.biases.astype(np.float32, copy=False),
+                        np.asarray(self.grad_weights, dtype=np.float32),
+                        np.asarray(self.grad_biases, dtype=np.float32),
+                        float(learning_rate),
+                    )
+                    self.weights = np.asarray(self.weights, dtype=float)
+                    self.biases = np.asarray(self.biases, dtype=float)
+                    self._sync_neurons_from_matrix()
+                    return
+                except Exception:
+                    pass
         self.weights = self.weights - (learning_rate * self.grad_weights)
         self.biases = self.biases - (learning_rate * self.grad_biases)
         self._sync_neurons_from_matrix()
