@@ -43,7 +43,7 @@ def train_dense_batch(
     inputs: np.ndarray,
     target_indices: np.ndarray,
     learning_rate: float,
-) -> Tuple[np.ndarray, np.ndarray, float]:
+) -> Tuple[np.ndarray, np.ndarray, float, str]:
     if torch is None or F is None:
         raise RuntimeError(
             "PyTorch backend is not available. Install torch to enable the MPS/CPU training path."
@@ -67,4 +67,5 @@ def train_dense_batch(
         updated_weights.detach().cpu().numpy(),
         updated_biases.detach().cpu().numpy(),
         float(loss.item()),
+        str(device),
     )

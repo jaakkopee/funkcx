@@ -130,7 +130,7 @@ class OneStepLanguageModel:
     def _print_progress_line(text: str) -> None:
         print(text, flush=True)
 
-    def _train_batch(self, context_batch: np.ndarray, target_indices: np.ndarray, learning_rate: float) -> float:
+    def _train_batch(self, context_batch: np.ndarray, target_indices: np.ndarray, learning_rate: float) -> Tuple[float, str]:
         layer = self.net.layers[0]
         x_batch = self._context_batch_to_inputs(context_batch)
         batch_size = max(1, context_batch.shape[0])
@@ -139,7 +139,7 @@ class OneStepLanguageModel:
             train_dense_batch = getattr(torch_backend, "train_dense_batch", None)
             if callable(train_dense_batch):
                 try:
-                    updated_weights, updated_biases, batch_loss = train_dense_batch(
+                    updated_weights, updated_biases, batch_loss, device_name = train_dense_batch(
                         layer.weights.astype(np.float32, copy=False),
                         layer.biases.astype(np.float32, copy=False),
                         x_batch.astype(np.float32, copy=False),
@@ -149,7 +149,7 @@ class OneStepLanguageModel:
                     layer.weights = np.asarray(updated_weights, dtype=float)
                     layer.biases = np.asarray(updated_biases, dtype=float)
                     layer._sync_neurons_from_matrix()
-                    return float(batch_loss)
+                    return float(batch_loss), f"torch ({device_name})"
                 except Exception:
                     pass
 
@@ -224,7 +224,7 @@ class OneStepLanguageModel:
                 layer.grad_weights = np.vstack(grad_weights_tiles)
                 layer.grad_biases = np.concatenate(grad_biases_tiles)
                 layer._sync_neurons_from_matrix()
-                return float(batch_loss)
+                return float(batch_loss), "metal"
 
         logits = np.asarray(layer.forward(x_batch), dtype=np.float64)
         logits = logits - np.max(logits, axis=1, keepdims=True)
@@ -245,7 +245,7 @@ class OneStepLanguageModel:
         layer.grad_biases = np.asarray(grad_biases, dtype=float)
         layer.update_params(learning_rate)
 
-        return float(batch_loss)
+        return float(batch_loss), "cpu"
 
     def train(
         self,
@@ -275,12 +275,16 @@ class OneStepLanguageModel:
             permutation = np.random.permutation(total_pairs)
             total_loss = 0.0
             self._print_progress_line(f"{self._epoch_header(epoch, epochs)}")
+            backend_reported = False
 
             for batch_number, start in enumerate(range(0, total_pairs, batch_size), start=1):
                 batch_indices = permutation[start:start + batch_size]
                 batch_contexts = self.contexts[batch_indices]
                 batch_targets = self.targets[batch_indices]
-                batch_loss = self._train_batch(batch_contexts, batch_targets, learning_rate)
+                batch_loss, backend_name = self._train_batch(batch_contexts, batch_targets, learning_rate)
+                if not backend_reported:
+                    print(f"Training backend: {backend_name}", flush=True)
+                    backend_reported = True
                 total_loss += batch_loss * len(batch_indices)
 
                 if total_pairs >= 200 and (batch_number % progress_stride == 0 or start + batch_size >= total_pairs):
