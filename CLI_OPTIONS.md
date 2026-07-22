@@ -21,6 +21,7 @@ Implemented CLI options below refer to `graphic_nn_wordLM.py`.
 | --temperature | float | 0.9 | inference/visualization | Sampling temperature for next-token prediction. |
 | --top-k | int | 5 | visualization | Number of top predictions to show in UI. |
 | --fps | int | 3 | visualization | UI refresh/update frame rate. |
+| --generation-log-file | string | (empty) | visualization/logging | Append generated text stream to this file; each reseed starts a new line. |
 | --force-retrain | flag | false | train/load | Force retraining even if model file exists. |
 | --train-only | flag | false | runner | Train then exit without launching pygame UI. |
 
