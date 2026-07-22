@@ -15,7 +15,7 @@ except Exception:
     metal_backend = None
 
 
-METAL_TILE_SIZE = 64
+METAL_TILE_SIZE = 16
 
 
 class OneStepLanguageModel:
