@@ -1,21 +1,47 @@
-import pygame
-import warnings
-import random
-import os
+import argparse
 import colorsys
+import os
+import pygame
+import random
+import warnings
 
 from language_model import WordLanguageModel
 
 
-MODEL_PATH = "nsoe.json"
-CORPUS_PATH = "nsoe.txt"
-LM_TEMPERATURE = 0.9
-TOP_K = 5
+DEFAULT_MODEL_PATH = "nsoe.json"
+DEFAULT_CORPUS_PATH = "nsoe.txt"
+DEFAULT_TEMPERATURE = 0.9
+DEFAULT_TOP_K = 5
+DEFAULT_CONTEXT_SIZE = 4
+DEFAULT_EPOCHS = 140
+DEFAULT_LEARNING_RATE = 0.08
+DEFAULT_PRINT_EVERY = 10
+DEFAULT_PROGRESS_CHUNKS = 12
+DEFAULT_BATCH_SIZE = 8
+DEFAULT_FPS = 3
 MIN_ZOOM = 0.4
 MAX_ZOOM = 3.5
 TOP_PANEL_HEIGHT = 160
 BOTTOM_PANEL_HEIGHT = 60
 ARROW_PAN_SCREEN_FRACTION = 0.25
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Word LM visualizer and trainer")
+    parser.add_argument("--model-path", default=DEFAULT_MODEL_PATH)
+    parser.add_argument("--corpus-path", default=DEFAULT_CORPUS_PATH)
+    parser.add_argument("--context-size", type=int, default=DEFAULT_CONTEXT_SIZE)
+    parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
+    parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE)
+    parser.add_argument("--print-every", type=int, default=DEFAULT_PRINT_EVERY)
+    parser.add_argument("--progress-chunks", type=int, default=DEFAULT_PROGRESS_CHUNKS)
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
+    parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
+    parser.add_argument("--fps", type=int, default=DEFAULT_FPS)
+    parser.add_argument("--force-retrain", action="store_true")
+    parser.add_argument("--train-only", action="store_true")
+    return parser.parse_args()
 
 
 def load_corpus_text(path):
@@ -31,24 +57,40 @@ def summarize_corpus(text, model):
     print(f"Corpus preview: {sample}")
 
 
-def load_or_train_word_model():
-    if os.path.exists(MODEL_PATH):
+def load_or_train_word_model(args):
+    if os.path.exists(args.model_path) and not args.force_retrain:
         try:
-            print(f"Loading model from {MODEL_PATH} ...")
-            model = WordLanguageModel.load(MODEL_PATH)
-            if getattr(model, "context_size", 1) >= 4:
+            print(f"Loading model from {args.model_path} ...")
+            model = WordLanguageModel.load(args.model_path)
+            if getattr(model, "context_size", 1) >= args.context_size:
+                print(
+                    "Loaded existing model; training arguments are ignored unless "
+                    "--force-retrain is provided."
+                )
                 return model
             print("Saved model context is too small, retraining with larger context...")
         except Exception as exc:
             print(f"Failed to load saved model: {exc}")
 
     print("Training new word model ...")
-    corpus = load_corpus_text(CORPUS_PATH)
-    model = WordLanguageModel(corpus, context_size=4)
+    corpus = load_corpus_text(args.corpus_path)
+    model = WordLanguageModel(corpus, context_size=args.context_size)
     summarize_corpus(corpus, model)
-    model.train(epochs=140, learning_rate=0.08, print_every=10, progress_chunks=12, batch_size=8)
-    model.save(MODEL_PATH)
-    print(f"Saved trained model to {MODEL_PATH}")
+    print(
+        "Training args: "
+        f"context={args.context_size}, epochs={args.epochs}, lr={args.learning_rate}, "
+        f"print_every={args.print_every}, progress_chunks={args.progress_chunks}, "
+        f"batch_size={args.batch_size}"
+    )
+    model.train(
+        epochs=args.epochs,
+        learning_rate=args.learning_rate,
+        print_every=args.print_every,
+        progress_chunks=args.progress_chunks,
+        batch_size=args.batch_size,
+    )
+    model.save(args.model_path)
+    print(f"Saved trained model to {args.model_path}")
     return model
 
 def init_font():
@@ -153,12 +195,18 @@ def compact_tokens(tokens):
 
 
 def main():
+    args = parse_args()
+
     pygame.init()
     font = init_font()
     if font is None:
         print("Warning: pygame font module is unavailable in this environment.")
 
-    model = load_or_train_word_model()
+    model = load_or_train_word_model(args)
+    if args.train_only:
+        print("Training complete (--train-only), exiting without launching GUI.")
+        return
+
     screen = pygame.display.set_mode((1060, 860))
     pygame.display.set_caption("Sketch Network Word-LM Visualizer")
 
@@ -216,8 +264,12 @@ def main():
             camera["offset_y"] += pan_y * (height * ARROW_PAN_SCREEN_FRACTION)
 
         screen.fill((0, 0, 0))
-        top_k = model.top_k_predictions_from_context(context_tokens, k=TOP_K, temperature=LM_TEMPERATURE)
-        display_distribution(screen, font, model, context_tokens, LM_TEMPERATURE, camera)
+        top_k = model.top_k_predictions_from_context(
+            context_tokens,
+            k=max(1, args.top_k),
+            temperature=args.temperature,
+        )
+        display_distribution(screen, font, model, context_tokens, args.temperature, camera)
 
         # Cover network visuals under static text areas.
         width, height = screen.get_size()
@@ -234,7 +286,7 @@ def main():
                 font,
                 [
                     f"Current token: {current_token}",
-                    f"Temperature: {LM_TEMPERATURE}",
+                    f"Temperature: {args.temperature}",
                     f"Vocab size: {model.vocab_size}",
                     f"Zoom: {camera['zoom']:.2f}",
                     "Pan: right-drag or arrows | Zoom: wheel | Reset: R",
@@ -243,7 +295,7 @@ def main():
                 y=20,
             )
 
-            top_lines = [f"Top {TOP_K} predictions:"]
+            top_lines = [f"Top {max(1, args.top_k)} predictions:"]
             top_lines.extend([f"{tok}: {prob:.3f}" for tok, prob in top_k])
             draw_text_lines(screen, font, top_lines, x=660, y=20)
 
@@ -252,7 +304,7 @@ def main():
         elif frame_index % 20 == 0:
             print(f"current={current_token!r} top={top_k}")
 
-        next_token = model.sample_next_from_context(context_tokens, temperature=LM_TEMPERATURE)
+        next_token = model.sample_next_from_context(context_tokens, temperature=args.temperature)
         generated_tokens.append(next_token)
         current_token = next_token
         context_tokens.append(next_token)
@@ -261,7 +313,7 @@ def main():
 
         pygame.display.flip()
         frame_index += 1
-        clock.tick(3)
+        clock.tick(max(1, args.fps))
 
     pygame.quit()
 
