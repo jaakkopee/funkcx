@@ -22,6 +22,7 @@ TOP_PANEL_HEIGHT = 160
 BOTTOM_PANEL_HEIGHT = 60
 PROMPT_BOX_HEIGHT = 46
 GENERATED_PREVIEW_MARGIN = 220
+GENERATED_PREVIEW_WORDS = 7
 
 
 def parse_args():
@@ -116,17 +117,19 @@ def compact_tokens(tokens):
     return text
 
 
-def fit_token_tail(font, tokens, max_width):
+def fit_token_tail(font, tokens, max_width, min_tokens=GENERATED_PREVIEW_WORDS):
     if font is None or not tokens:
         return tokens[:]
 
-    start = max(0, len(tokens) - 1)
-    while start > 0:
-        preview = compact_tokens(tokens[start:])
-        if font.size(preview)[0] <= max_width:
-            return tokens[start:]
-        start -= 1
-    return tokens[-1:]
+    min_tokens = max(1, int(min_tokens))
+    if len(tokens) <= min_tokens:
+        return tokens[:]
+
+    tail_tokens = tokens[-min_tokens:]
+    preview = compact_tokens(tail_tokens)
+    if font.size(preview)[0] <= max_width:
+        return tail_tokens
+    return tail_tokens
 
 
 def build_seed_state(model, prompt_text):
