@@ -87,6 +87,31 @@ class OneStepLanguageModel:
                 context_input[row_indices, token_indices] = 1.0
         return context_input.reshape(self.context_size * self.vocab_size)
 
+    def _generate_token_sequence(self, seed_tokens: List[str], length: int, temperature: float) -> List[str]:
+        if length <= 0:
+            return seed_tokens[:]
+
+        if not seed_tokens:
+            seed_tokens = [random.choice(self.vocab)]
+
+        out = seed_tokens[:]
+        context_indices = self._context_tokens_to_indices(out[-self.context_size:])
+        context_input = self._context_indices_to_input(context_indices).reshape(self.context_size, self.vocab_size)
+        flat_context_input = context_input.reshape(self.context_size * self.vocab_size)
+
+        for _ in range(length):
+            logits = self.net.forward(flat_context_input)
+            probs = self._softmax(logits, temperature=temperature)
+            next_idx = self._sample_from_probs(probs)
+            out.append(self.itos[next_idx])
+
+            if self.context_size > 1:
+                context_input[:-1] = context_input[1:]
+            context_input[-1].fill(0.0)
+            context_input[-1, next_idx] = 1.0
+
+        return out
+
     def _context_batch_to_inputs(self, context_batch: np.ndarray) -> np.ndarray:
         batch_size = context_batch.shape[0]
         context_input = np.zeros((batch_size, self.context_size, self.vocab_size), dtype=np.float32)
@@ -568,17 +593,7 @@ class CharLanguageModel(OneStepLanguageModel):
             if ch not in self.stoi:
                 raise ValueError(f"Seed contains unknown char: {ch!r}")
 
-        out = list(seed)
-        context_tokens = out[-self.context_size:]
-
-        for _ in range(length):
-            next_char = self.sample_next_from_context(context_tokens, temperature=temperature)
-            out.append(next_char)
-            context_tokens.append(next_char)
-            if len(context_tokens) > self.context_size:
-                context_tokens.pop(0)
-
-        return "".join(out)
+        return "".join(self._generate_token_sequence(list(seed), length, temperature))
 
     @classmethod
     def load(cls, path: str):
@@ -615,15 +630,7 @@ class WordLanguageModel(OneStepLanguageModel):
             if token not in self.stoi:
                 raise ValueError(f"Seed contains unknown token: {token!r}")
 
-        out = seed_tokens[:]
-        context_tokens = out[-self.context_size:]
-
-        for _ in range(length):
-            next_token = self.sample_next_from_context(context_tokens, temperature=temperature)
-            out.append(next_token)
-            context_tokens.append(next_token)
-            if len(context_tokens) > self.context_size:
-                context_tokens.pop(0)
+        out = self._generate_token_sequence(seed_tokens, length, temperature)
 
         # Compact punctuation spacing.
         text = " ".join(out)
