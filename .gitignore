@@ -5,3 +5,12 @@ __pycache__/
 *.pyo
 *.pyd
 *.pycache/
+
+# generated model artifacts
+nsoe.json
+word_lm_weights.json
+char_lm_weights.json
+
+# native build outputs
+build/
+_metal_nn*.so
