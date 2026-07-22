@@ -186,11 +186,15 @@ def main():
                     prompt_text += event.unicode
 
         screen.fill((0, 0, 0))
-        top_k = model.top_k_predictions_from_context(
+        logits, probs = model.predict_logits_and_probs_from_context(
             context_tokens,
-            k=max(1, args.top_k),
             temperature=args.temperature,
         )
+        top_k = sorted(
+            ((model.itos[i], float(probs[i])) for i in range(model.vocab_size)),
+            key=lambda item: item[1],
+            reverse=True,
+        )[: max(1, args.top_k)]
 
         width, height = screen.get_size()
         pygame.draw.rect(screen, (0, 0, 0), pygame.Rect(0, 0, width, TOP_PANEL_HEIGHT))
@@ -238,7 +242,7 @@ def main():
         elif frame_index % 20 == 0:
             print(f"current={current_token!r} top={top_k}")
 
-        next_token = model.sample_next_from_context(context_tokens, temperature=args.temperature)
+        next_token = model.itos[model._sample_from_probs(probs)]
         generated_tokens.append(next_token)
         current_token = next_token
         context_tokens.append(next_token)
