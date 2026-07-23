@@ -4,6 +4,7 @@ import pygame
 import random
 import warnings
 
+from gematria_engine import GematriaEngine
 from language_model import WordLanguageModel
 
 
@@ -119,6 +120,28 @@ def compact_tokens(tokens):
     return text
 
 
+def format_reduction_path(path):
+    return "->".join(str(value) for value in path)
+
+
+def format_token_with_reduction(token, gematria_engine, reduction_cache):
+    if token in NO_LEADING_SPACE_TOKENS:
+        return token
+    if token in reduction_cache:
+        return reduction_cache[token]
+
+    # Keep the original token text, but normalize for mapping lookup.
+    lookup_token = token.upper()
+    path = gematria_engine.numerological_reduction_path(lookup_token)
+    annotated = f"{token}({format_reduction_path(path)})"
+    reduction_cache[token] = annotated
+    return annotated
+
+
+def annotate_tokens(tokens, gematria_engine, reduction_cache):
+    return [format_token_with_reduction(token, gematria_engine, reduction_cache) for token in tokens]
+
+
 def fit_token_tail(font, tokens, max_width, min_tokens=GENERATED_PREVIEW_WORDS):
     if font is None or not tokens:
         return tokens[:]
@@ -134,6 +157,21 @@ def fit_token_tail(font, tokens, max_width, min_tokens=GENERATED_PREVIEW_WORDS):
     return tail_tokens
 
 
+def fit_annotated_token_tail(font, tokens, max_width, gematria_engine, reduction_cache, min_tokens=2):
+    if font is None or not tokens:
+        return annotate_tokens(tokens, gematria_engine, reduction_cache)
+
+    min_tokens = max(1, int(min_tokens))
+    tail_tokens = tokens[-max(min_tokens, GENERATED_PREVIEW_WORDS):]
+    annotated_tail = annotate_tokens(tail_tokens, gematria_engine, reduction_cache)
+
+    while len(annotated_tail) > min_tokens and font.size(compact_tokens(annotated_tail))[0] > max_width:
+        tail_tokens = tail_tokens[1:]
+        annotated_tail = annotate_tokens(tail_tokens, gematria_engine, reduction_cache)
+
+    return annotated_tail
+
+
 def append_token_to_log(log_file, token, line_has_content, split_on_period=False):
     if token in NO_LEADING_SPACE_TOKENS or not line_has_content:
         log_file.write(token)
@@ -145,10 +183,42 @@ def append_token_to_log(log_file, token, line_has_content, split_on_period=False
     return True
 
 
+def append_token_with_reduction_to_log(
+    log_file,
+    token,
+    line_has_content,
+    gematria_engine,
+    reduction_cache,
+    split_on_period=False,
+):
+    printable = format_token_with_reduction(token, gematria_engine, reduction_cache)
+    if token in NO_LEADING_SPACE_TOKENS or not line_has_content:
+        log_file.write(printable)
+    else:
+        log_file.write(f" {printable}")
+    if split_on_period and token == ".":
+        log_file.write("\n")
+        return False
+    return True
+
+
 def append_tokens_to_log(log_file, tokens):
     line_has_content = False
     for token in tokens:
         line_has_content = append_token_to_log(log_file, token, line_has_content)
+    return line_has_content
+
+
+def append_tokens_with_reduction_to_log(log_file, tokens, gematria_engine, reduction_cache):
+    line_has_content = False
+    for token in tokens:
+        line_has_content = append_token_with_reduction_to_log(
+            log_file,
+            token,
+            line_has_content,
+            gematria_engine,
+            reduction_cache,
+        )
     return line_has_content
 
 
@@ -169,6 +239,8 @@ def main():
     args = parse_args()
     generation_log = None
     log_line_has_content = False
+    gematria_engine = GematriaEngine()
+    reduction_cache = {}
 
     if args.generation_log_file:
         log_path = os.path.abspath(args.generation_log_file)
@@ -200,7 +272,12 @@ def main():
     input_active = True
 
     if generation_log is not None:
-        log_line_has_content = append_tokens_to_log(generation_log, generated_tokens)
+        log_line_has_content = append_tokens_with_reduction_to_log(
+            generation_log,
+            generated_tokens,
+            gematria_engine,
+            reduction_cache,
+        )
         generation_log.flush()
 
     running = True
@@ -218,7 +295,12 @@ def main():
                         generated_tokens, context_tokens, current_token = build_seed_state(model, prompt_text)
                         if generation_log is not None:
                             generation_log.write("\n")
-                            log_line_has_content = append_tokens_to_log(generation_log, generated_tokens)
+                            log_line_has_content = append_tokens_with_reduction_to_log(
+                                generation_log,
+                                generated_tokens,
+                                gematria_engine,
+                                reduction_cache,
+                            )
                             generation_log.flush()
                     elif event.key == pygame.K_BACKSPACE:
                         prompt_text = prompt_text[:-1]
@@ -265,13 +347,20 @@ def main():
                 )
 
                 top_lines = [f"Top {max(1, args.top_k)} predictions:"]
-                top_lines.extend([f"{tok}: {prob:.3f}" for tok, prob in top_k])
+                top_lines.extend(
+                    [
+                        f"{format_token_with_reduction(tok, gematria_engine, reduction_cache)}: {prob:.3f}"
+                        for tok, prob in top_k
+                    ]
+                )
                 draw_text_lines(screen, font, top_lines, x=660, y=20)
 
-                preview_tokens = fit_token_tail(
+                preview_tokens = fit_annotated_token_tail(
                     font,
                     generated_tokens,
                     max(1, width - 48 - GENERATED_PREVIEW_MARGIN),
+                    gematria_engine,
+                    reduction_cache,
                 )
                 preview = compact_tokens(preview_tokens)
                 draw_text_lines(screen, font, [f"Generated: {preview}"], x=24, y=814, line_gap=22)
@@ -292,10 +381,12 @@ def main():
                 context_tokens.pop(0)
 
             if generation_log is not None:
-                log_line_has_content = append_token_to_log(
+                log_line_has_content = append_token_with_reduction_to_log(
                     generation_log,
                     next_token,
                     log_line_has_content,
+                    gematria_engine,
+                    reduction_cache,
                     split_on_period=True,
                 )
                 generation_log.flush()
