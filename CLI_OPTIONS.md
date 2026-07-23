@@ -4,7 +4,7 @@ This document tracks command-line options for this project.
 
 ## Scope
 
-Implemented CLI options below refer to `graphic_nn_wordLM.py`.
+Implemented CLI options below refer to `funkcx.py`.
 
 ## Implemented Options
 
@@ -87,6 +87,6 @@ These were planned and are good candidates, but are not currently wired as CLI o
 
 ## Notes
 
-- Current implemented CLI lives in `graphic_nn_wordLM.py`.
+- Current implemented CLI lives in `funkcx.py`.
 - `language_model.py` has internal constants affecting backend and memory behavior, but most are not yet exposed as CLI flags.
 - If model already exists and `--force-retrain` is not used, training options are ignored because the model is loaded instead of retrained.

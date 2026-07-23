@@ -22,7 +22,7 @@ The project trains lightweight character-level and word-level language models on
 - `language_model.py`: character and word language model logic, training, batching, and save/load.
 - `neuralnet.py`: lightweight dense-layer and neuron implementation.
 - `graphic_nn.py`: character-level visualization.
-- `graphic_nn_wordLM.py`: word-level visualization using `nsoe.txt` and saved model weights.
+- `funkcx.py`: word-level visualization using `nsoe.txt` and saved model weights.
 - `metal_backend.mm` / `metal_dense.metal`: optional native Metal dense-layer implementation.
 - `metal_backend.py`: Python wrapper that falls back cleanly when the native module is unavailable.
 - `torch_backend.py`: optional PyTorch training backend for the dense batch step.
@@ -46,7 +46,7 @@ pip install torch
 3. Run the word-level visualizer with `nsoe.txt`:
 
 ```bash
-python graphic_nn_wordLM.py
+python funkcx.py
 ```
 
 4. Run the character-level visualizer:
