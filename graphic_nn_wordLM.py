@@ -22,6 +22,9 @@ DEFAULT_FPS = 3
 TOP_PANEL_HEIGHT = 160
 BOTTOM_PANEL_HEIGHT = 60
 PROMPT_BOX_HEIGHT = 46
+WORDS_PER_LINE = 9
+LINES_PER_PAGE = 7
+WORDS_PER_PAGE = WORDS_PER_LINE * LINES_PER_PAGE
 GENERATED_PREVIEW_MARGIN = 220
 GENERATED_PREVIEW_WORDS = 7
 NO_LEADING_SPACE_TOKENS = {".", ",", "!", "?", ";", ":"}
@@ -140,6 +143,37 @@ def format_token_with_reduction(token, gematria_engine, reduction_cache):
 
 def annotate_tokens(tokens, gematria_engine, reduction_cache):
     return [format_token_with_reduction(token, gematria_engine, reduction_cache) for token in tokens]
+
+
+def append_token_to_plain_words(plain_words, token):
+    if token in NO_LEADING_SPACE_TOKENS:
+        if plain_words:
+            plain_words[-1] = f"{plain_words[-1]}{token}"
+        else:
+            plain_words.append(token)
+        return
+    plain_words.append(token)
+
+
+def build_plain_words(tokens):
+    plain_words = []
+    for token in tokens:
+        append_token_to_plain_words(plain_words, token)
+    return plain_words
+
+
+def plain_words_to_page_lines(words, words_per_line=WORDS_PER_LINE, lines_per_page=LINES_PER_PAGE):
+    lines = []
+    for idx in range(0, len(words), max(1, words_per_line)):
+        lines.append(" ".join(words[idx:idx + max(1, words_per_line)]))
+
+    if not lines:
+        lines = [""]
+
+    pages = []
+    for idx in range(0, len(lines), max(1, lines_per_page)):
+        pages.append(lines[idx:idx + max(1, lines_per_page)])
+    return pages
 
 
 def fit_token_tail(font, tokens, max_width, min_tokens=GENERATED_PREVIEW_WORDS):
@@ -266,6 +300,8 @@ def main():
     clock = pygame.time.Clock()
     current_token = random.choice([token for token in model.vocab if token.isalpha()])
     generated_tokens = [current_token]
+    generated_plain_words = build_plain_words(generated_tokens)
+    current_page_index = 0
     context_tokens = [current_token]
     frame_index = 0
     prompt_text = current_token
@@ -293,6 +329,8 @@ def main():
                 elif event.type == pygame.KEYDOWN and input_active:
                     if event.key == pygame.K_RETURN:
                         generated_tokens, context_tokens, current_token = build_seed_state(model, prompt_text)
+                        generated_plain_words = build_plain_words(generated_tokens)
+                        current_page_index = 0
                         if generation_log is not None:
                             generation_log.write("\n")
                             log_line_has_content = append_tokens_with_reduction_to_log(
@@ -355,6 +393,31 @@ def main():
                 )
                 draw_text_lines(screen, font, top_lines, x=660, y=20)
 
+                pages = plain_words_to_page_lines(generated_plain_words)
+                current_page_index = min(current_page_index, max(0, len(pages) - 1))
+                current_page_lines = pages[current_page_index]
+                draw_text_lines(
+                    screen,
+                    font,
+                    [
+                        (
+                            "Generated text "
+                        )
+                    ],
+                    x=24,
+                    y=188,
+                    line_gap=22,
+                )
+                draw_text_lines(
+                    screen,
+                    font,
+                    current_page_lines,
+                    x=24,
+                    y=222,
+                    line_gap=58,
+                    color=(220, 220, 220),
+                )
+
                 preview_tokens = fit_annotated_token_tail(
                     font,
                     generated_tokens,
@@ -364,6 +427,7 @@ def main():
                 )
                 preview = compact_tokens(preview_tokens)
                 draw_text_lines(screen, font, [f"Generated: {preview}"], x=24, y=814, line_gap=22)
+
                 prompt_label = "Prompt / seed text:"
                 prompt_display = prompt_text if prompt_text else ""
                 draw_text_lines(screen, font, [prompt_label], x=24, y=height - 142, line_gap=22)
@@ -375,6 +439,12 @@ def main():
 
             next_token = model.itos[model._sample_from_probs(probs)]
             generated_tokens.append(next_token)
+            page_word_count_before = len(generated_plain_words)
+            append_token_to_plain_words(generated_plain_words, next_token)
+            if len(generated_plain_words) > page_word_count_before:
+                page_limit = (current_page_index + 1) * WORDS_PER_PAGE
+                if len(generated_plain_words) > page_limit:
+                    current_page_index += 1
             current_token = next_token
             context_tokens.append(next_token)
             if len(context_tokens) > model.context_size:
