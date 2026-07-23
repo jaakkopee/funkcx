@@ -19,6 +19,8 @@ DEFAULT_PRINT_EVERY = 10
 DEFAULT_PROGRESS_CHUNKS = 12
 DEFAULT_BATCH_SIZE = 8
 DEFAULT_FPS = 3
+DEFAULT_WINDOW_WIDTH = 2200
+DEFAULT_WINDOW_HEIGHT = 1300
 TOP_PANEL_HEIGHT = 160
 BOTTOM_PANEL_HEIGHT = 60
 PROMPT_BOX_HEIGHT = 46
@@ -28,6 +30,54 @@ WORDS_PER_PAGE = WORDS_PER_LINE * LINES_PER_PAGE
 GENERATED_PREVIEW_MARGIN = 220
 GENERATED_PREVIEW_WORDS = 7
 NO_LEADING_SPACE_TOKENS = {".", ",", "!", "?", ";", ":"}
+
+
+def compute_ui_scale(width, height):
+    base_w = max(1, int(DEFAULT_WINDOW_WIDTH))
+    base_h = max(1, int(DEFAULT_WINDOW_HEIGHT))
+    raw_scale = min(width / base_w, height / base_h)
+    return max(0.5, min(1.8, raw_scale))
+
+
+def get_scaled_fonts(scale, enabled, cache):
+    if not enabled:
+        return None, None
+    main_size = max(18, int(36 * scale))
+    small_size = max(12, int(22 * scale))
+    key = (main_size, small_size)
+    if key not in cache:
+        cache[key] = (pygame.font.Font(None, main_size), pygame.font.Font(None, small_size))
+    return cache[key]
+
+
+def compute_layout(width, height, scale, main_font):
+    header_gap = max(16, int(24 * scale))
+    header_lines = 6
+    top_panel_height = max(int(TOP_PANEL_HEIGHT * scale), 24 + header_lines * header_gap)
+    bottom_panel_height = max(24, int(BOTTOM_PANEL_HEIGHT * scale))
+    prompt_box_height = max(28, int(PROMPT_BOX_HEIGHT * scale))
+
+    prompt_y = height - max(84, int(108 * scale))
+    prompt_y = min(prompt_y, height - prompt_box_height - bottom_panel_height - 4)
+    prompt_y = max(top_panel_height + 12, prompt_y)
+
+    prompt_label_y = max(top_panel_height + 8, prompt_y - max(24, int(34 * scale)))
+    preview_y = height - bottom_panel_height + max(4, int(8 * scale))
+
+    middle_title_y = top_panel_height + max(8, int(18 * scale))
+    middle_grid_y = middle_title_y + max(22, int(34 * scale))
+
+    return {
+        "header_gap": header_gap,
+        "top_panel_height": top_panel_height,
+        "bottom_panel_height": bottom_panel_height,
+        "prompt_box_height": prompt_box_height,
+        "prompt_y": prompt_y,
+        "prompt_label_y": prompt_label_y,
+        "preview_y": preview_y,
+        "middle_title_y": middle_title_y,
+        "middle_grid_y": middle_grid_y,
+    }
 
 
 def parse_args():
@@ -163,17 +213,123 @@ def build_plain_words(tokens):
 
 
 def plain_words_to_page_lines(words, words_per_line=WORDS_PER_LINE, lines_per_page=LINES_PER_PAGE):
-    lines = []
-    for idx in range(0, len(words), max(1, words_per_line)):
-        lines.append(" ".join(words[idx:idx + max(1, words_per_line)]))
-
-    if not lines:
-        lines = [""]
+    words_per_line = max(1, int(words_per_line))
+    lines_per_page = max(1, int(lines_per_page))
+    words_per_page = words_per_line * lines_per_page
 
     pages = []
-    for idx in range(0, len(lines), max(1, lines_per_page)):
-        pages.append(lines[idx:idx + max(1, lines_per_page)])
+    for idx in range(0, len(words), words_per_page):
+        pages.append(words[idx:idx + words_per_page])
+    if not pages:
+        pages = [[]]
     return pages
+
+
+def reduction_text_for_word(word, gematria_engine, cache):
+    if word in cache:
+        return cache[word]
+
+    mapping = gematria_engine.get_mapping()
+    normalized_chars = []
+    for ch in word:
+        if ch in mapping:
+            normalized_chars.append(ch)
+        elif ch.upper() in mapping:
+            normalized_chars.append(ch.upper())
+        elif ch.lower() in mapping:
+            normalized_chars.append(ch.lower())
+    normalized = "".join(normalized_chars)
+    if not normalized:
+        cache[word] = "-"
+        return cache[word]
+
+    path = gematria_engine.numerological_reduction_path(normalized)
+    cache[word] = format_reduction_path(path)
+    return cache[word]
+
+
+def fit_text_to_width(font, text, max_width):
+    if font is None:
+        return text
+    if max_width <= 0:
+        return ""
+    if font.size(text)[0] <= max_width:
+        return text
+
+    ellipsis = "..."
+    if font.size(ellipsis)[0] > max_width:
+        return ""
+
+    trimmed = text
+    while trimmed and font.size(trimmed + ellipsis)[0] > max_width:
+        trimmed = trimmed[:-1]
+    return trimmed + ellipsis if trimmed else ellipsis
+
+
+def draw_middle_page_with_reductions(
+    screen,
+    word_font,
+    small_font,
+    page_words,
+    gematria_engine,
+    reduction_path_cache,
+    x,
+    y,
+    panel_width,
+):
+    if word_font is None:
+        return panel_width
+
+    cols = max(1, int(WORDS_PER_LINE))
+    display_words = [word for word in page_words if word]
+    if display_words:
+        max_word_width = max(word_font.size(word)[0] for word in display_words)
+    else:
+        max_word_width = word_font.size("-")[0]
+
+    if small_font is not None and display_words:
+        max_reduction_width = max(
+            small_font.size(reduction_text_for_word(word, gematria_engine, reduction_path_cache))[0]
+            for word in display_words
+        )
+    elif small_font is not None:
+        max_reduction_width = small_font.size("-")[0]
+    else:
+        max_reduction_width = 0
+
+    content_width = max(max_word_width, max_reduction_width)
+    cell_padding = 4
+    cell_width = max(1, content_width + (cell_padding * 2) + 16)
+    word_line_height = word_font.get_linesize()
+    small_line_height = small_font.get_linesize() if small_font is not None else 0
+    row_height = word_line_height + small_line_height + 12
+    panel_width = cell_width * cols
+
+    panel_rows = max(1, int(LINES_PER_PAGE))
+    panel_height = row_height * panel_rows
+    panel_rect = pygame.Rect(x - 8, y - 8, panel_width + 16, panel_height + 16)
+    pygame.draw.rect(screen, (16, 16, 16), panel_rect)
+    pygame.draw.rect(screen, (70, 70, 70), panel_rect, width=1)
+
+    for idx, word in enumerate(page_words):
+        row = idx // cols
+        col = idx % cols
+        cell_x = x + col * cell_width
+        cell_y = y + row * row_height
+        cell_rect = pygame.Rect(cell_x, cell_y, cell_width, row_height)
+
+        pygame.draw.rect(screen, (22, 22, 22), cell_rect)
+        pygame.draw.rect(screen, (52, 52, 52), cell_rect, width=1)
+
+        word_surface = word_font.render(word, True, (220, 220, 220))
+        screen.blit(word_surface, (cell_x + cell_padding, cell_y))
+
+        if small_font is not None:
+            reduction_text = reduction_text_for_word(word, gematria_engine, reduction_path_cache)
+            reduction_surface = small_font.render(reduction_text, True, (150, 180, 235))
+            screen.blit(reduction_surface, (cell_x + cell_padding, cell_y + word_line_height + 2))
+
+    return panel_width
 
 
 def fit_token_tail(font, tokens, max_width, min_tokens=GENERATED_PREVIEW_WORDS):
@@ -275,6 +431,7 @@ def main():
     log_line_has_content = False
     gematria_engine = GematriaEngine()
     reduction_cache = {}
+    reduction_path_cache = {}
 
     if args.generation_log_file:
         log_path = os.path.abspath(args.generation_log_file)
@@ -285,8 +442,10 @@ def main():
         print(f"Logging generated text to {log_path}")
 
     pygame.init()
-    font = init_font()
-    if font is None:
+    font_probe = init_font()
+    fonts_enabled = font_probe is not None
+    font_cache = {}
+    if not fonts_enabled:
         print("Warning: pygame font module is unavailable in this environment.")
 
     model = load_or_train_word_model(args)
@@ -294,7 +453,9 @@ def main():
         print("Training complete (--train-only), exiting without launching GUI.")
         return
 
-    screen = pygame.display.set_mode((1060, 860))
+    windowed_size = (DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
+    is_fullscreen = False
+    screen = pygame.display.set_mode(windowed_size, pygame.RESIZABLE)
     pygame.display.set_caption("Sketch Network Word-LM Visualizer")
 
     clock = pygame.time.Clock()
@@ -319,14 +480,31 @@ def main():
     running = True
     try:
         while running:
+            width, height = screen.get_size()
+            ui_scale = compute_ui_scale(width, height)
+            font, small_font = get_scaled_fonts(ui_scale, fonts_enabled, font_cache)
+            layout = compute_layout(width, height, ui_scale, font)
+            prompt_rect = pygame.Rect(24, layout["prompt_y"], width - 48, layout["prompt_box_height"])
+
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.MOUSEBUTTONDOWN:
-                    width, height = screen.get_size()
-                    prompt_rect = pygame.Rect(24, height - 108, width - 48, PROMPT_BOX_HEIGHT)
                     input_active = prompt_rect.collidepoint(event.pos)
-                elif event.type == pygame.KEYDOWN and input_active:
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_F11:
+                        if is_fullscreen:
+                            screen = pygame.display.set_mode(windowed_size, pygame.RESIZABLE)
+                            is_fullscreen = False
+                        else:
+                            windowed_size = screen.get_size()
+                            screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+                            is_fullscreen = True
+                        continue
+
+                    if not input_active:
+                        continue
+
                     if event.key == pygame.K_RETURN:
                         generated_tokens, context_tokens, current_token = build_seed_state(model, prompt_text)
                         generated_plain_words = build_plain_words(generated_tokens)
@@ -359,13 +537,17 @@ def main():
             )[: max(1, args.top_k)]
 
             width, height = screen.get_size()
-            pygame.draw.rect(screen, (0, 0, 0), pygame.Rect(0, 0, width, TOP_PANEL_HEIGHT))
+            ui_scale = compute_ui_scale(width, height)
+            font, small_font = get_scaled_fonts(ui_scale, fonts_enabled, font_cache)
+            layout = compute_layout(width, height, ui_scale, font)
+            prompt_rect = pygame.Rect(24, layout["prompt_y"], width - 48, layout["prompt_box_height"])
+
+            pygame.draw.rect(screen, (0, 0, 0), pygame.Rect(0, 0, width, layout["top_panel_height"]))
             pygame.draw.rect(
                 screen,
                 (0, 0, 0),
-                pygame.Rect(0, height - BOTTOM_PANEL_HEIGHT, width, BOTTOM_PANEL_HEIGHT),
+                pygame.Rect(0, height - layout["bottom_panel_height"], width, layout["bottom_panel_height"]),
             )
-            prompt_rect = pygame.Rect(24, height - 108, width - 48, PROMPT_BOX_HEIGHT)
             pygame.draw.rect(screen, (20, 20, 20), prompt_rect)
             pygame.draw.rect(screen, (180, 180, 180) if input_active else (90, 90, 90), prompt_rect, width=2)
 
@@ -378,10 +560,39 @@ def main():
                         f"Temperature: {args.temperature}",
                         f"Vocab size: {model.vocab_size}",
                         f"FPS: {max(1, args.fps)}",
+                        "Press F11 to toggle fullscreen.",
                         "Prompt field active. Press Enter to reseed generation.",
                     ],
                     x=24,
                     y=20,
+                    line_gap=layout["header_gap"],
+                )
+
+                pages = plain_words_to_page_lines(generated_plain_words)
+                current_page_index = min(current_page_index, max(0, len(pages) - 1))
+                current_page_words = pages[current_page_index]
+
+                estimated_panel_width = max(260, min(width - 48, width - 560))
+                draw_text_lines(
+                    screen,
+                    font,
+                    [
+                        f"Generated text (page {current_page_index + 1}/{len(pages)}):"
+                    ],
+                    x=24,
+                    y=layout["middle_title_y"],
+                    line_gap=max(16, int(22 * ui_scale)),
+                )
+                dynamic_panel_width = draw_middle_page_with_reductions(
+                    screen,
+                    font,
+                    small_font,
+                    current_page_words,
+                    gematria_engine,
+                    reduction_path_cache,
+                    x=24,
+                    y=layout["middle_grid_y"],
+                    panel_width=estimated_panel_width,
                 )
 
                 top_lines = [f"Top {max(1, args.top_k)} predictions:"]
@@ -391,32 +602,8 @@ def main():
                         for tok, prob in top_k
                     ]
                 )
-                draw_text_lines(screen, font, top_lines, x=660, y=20)
-
-                pages = plain_words_to_page_lines(generated_plain_words)
-                current_page_index = min(current_page_index, max(0, len(pages) - 1))
-                current_page_lines = pages[current_page_index]
-                draw_text_lines(
-                    screen,
-                    font,
-                    [
-                        (
-                            "Generated text "
-                        )
-                    ],
-                    x=24,
-                    y=188,
-                    line_gap=22,
-                )
-                draw_text_lines(
-                    screen,
-                    font,
-                    current_page_lines,
-                    x=24,
-                    y=222,
-                    line_gap=58,
-                    color=(220, 220, 220),
-                )
+                top_panel_x = min(max(24, 24 + dynamic_panel_width + 36), max(24, width - 420))
+                draw_text_lines(screen, font, top_lines, x=top_panel_x, y=20)
 
                 preview_tokens = fit_annotated_token_tail(
                     font,
@@ -426,14 +613,34 @@ def main():
                     reduction_cache,
                 )
                 preview = compact_tokens(preview_tokens)
-                draw_text_lines(screen, font, [f"Generated: {preview}"], x=24, y=814, line_gap=22)
+                draw_text_lines(
+                    screen,
+                    font,
+                    [f"Generated: {preview}"],
+                    x=24,
+                    y=layout["preview_y"],
+                    line_gap=max(16, int(22 * ui_scale)),
+                )
 
                 prompt_label = "Prompt / seed text:"
                 prompt_display = prompt_text if prompt_text else ""
-                draw_text_lines(screen, font, [prompt_label], x=24, y=height - 142, line_gap=22)
+                draw_text_lines(
+                    screen,
+                    font,
+                    [prompt_label],
+                    x=24,
+                    y=layout["prompt_label_y"],
+                    line_gap=max(16, int(22 * ui_scale)),
+                )
                 cursor = "|" if input_active and (frame_index // 15) % 2 == 0 else ""
                 prompt_surface = font.render(prompt_display + cursor, True, (235, 235, 235))
-                screen.blit(prompt_surface, (prompt_rect.x + 12, prompt_rect.y + 8))
+                screen.blit(
+                    prompt_surface,
+                    (
+                        prompt_rect.x + max(8, int(12 * ui_scale)),
+                        prompt_rect.y + max(4, int(8 * ui_scale)),
+                    ),
+                )
             elif frame_index % 20 == 0:
                 print(f"current={current_token!r} top={top_k}")
 
